@@ -49,6 +49,7 @@ export async function syncConnection(
       accessToken,
       trueLayerAccountsById,
       includeCategoryInNotes: config.includeCategoryInNotes,
+      lookbackDays: config.lookbackDays,
       dryRun,
     })
     updatedAccounts.push(hadTransactions ? { ...configAccount, lastSyncDate: currentDate() } : configAccount)

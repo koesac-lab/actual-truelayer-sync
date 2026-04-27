@@ -19,7 +19,9 @@ const baseConnection: Connection = {
 }
 
 const baseConfig: Config = {
+  version: 1,
   includeCategoryInNotes: false,
+  lookbackDays: 14,
   connections: [baseConnection],
   env: {
     TRUELAYER_CLIENT_ID: 'client-id',
@@ -27,6 +29,7 @@ const baseConfig: Config = {
     ACTUAL_SERVER_URL: 'http://localhost:5006',
     ACTUAL_SERVER_PASSWORD: 'password',
     ACTUAL_SYNC_ID: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    LOG_FORMAT: 'json',
   },
 }
 
@@ -75,6 +78,7 @@ describe('syncConnection', () => {
         configAccount: expect.objectContaining({ trueLayerId: 'acc-1' }),
         accessToken: 'new-access',
         includeCategoryInNotes: false,
+        lookbackDays: 14,
         dryRun: false,
       }),
     )

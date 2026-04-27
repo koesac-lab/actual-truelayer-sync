@@ -1,5 +1,3 @@
-const LOOKBACK_DAYS = 14
-
 export function dateTimeToYMD(dateTime: string): string {
   return dateTime.slice(0, 10)
 }
@@ -12,8 +10,8 @@ export function currentDate(): string {
   return dateTimeToYMD(new Date().toISOString())
 }
 
-export function computeFromDate(lastSyncDate: string): string {
+export function computeFromDate(lastSyncDate: string, lookbackDays = 14): string {
   const d = new Date(lastSyncDate)
-  d.setDate(d.getDate() - LOOKBACK_DAYS)
+  d.setDate(d.getDate() - lookbackDays)
   return dateTimeToYMD(d.toISOString())
 }

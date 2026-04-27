@@ -18,7 +18,9 @@ export const ConnectionSchema = z.object({
 })
 
 export const FileConfigSchema = z.object({
+    version: z.number().int(),
   includeCategoryInNotes: z.boolean().default(false),
+  lookbackDays: z.number().int().positive().default(14),
   connections: z.array(ConnectionSchema).min(1),
 })
 

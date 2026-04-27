@@ -1,5 +1,7 @@
 {
+  "version": 1,
   "includeCategoryInNotes": false,
+  "lookbackDays": 14,
   "connections": [
     {
       "name": "My Bank",

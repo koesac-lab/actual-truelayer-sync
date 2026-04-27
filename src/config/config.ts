@@ -4,6 +4,7 @@ import { Config, EnvSchema, FileConfigSchema } from './schema'
 import { log } from '../utils/logger'
 
 const CONFIG_PATH = path.resolve(__dirname, '..', '..', 'data', 'config.json')
+const CURRENT_CONFIG_VERSION = 1
 
 export async function loadConfig(): Promise<Config> {
   // Validate environment variables
@@ -31,7 +32,17 @@ export async function loadConfig(): Promise<Config> {
 
   const fileResult = FileConfigSchema.safeParse(raw)
   if (!fileResult.success) {
-    throw new Error(`Invalid config file:\n${fileResult.error.toString()}`)
+    const issues = fileResult.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n')
+    throw new Error(
+      `Invalid config file:\n${issues}\n\nSee config.example.json for the expected format.`,
+    )
+  }
+
+  if (fileResult.data.version !== CURRENT_CONFIG_VERSION) {
+    throw new Error(
+      `Config version mismatch: found v${fileResult.data.version}, expected v${CURRENT_CONFIG_VERSION}.\n` +
+        `See MIGRATION.md for upgrade instructions.`,
+    )
   }
 
   return { ...fileResult.data, env: envResult.data }

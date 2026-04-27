@@ -90,6 +90,7 @@ describe('ConnectionSchema', () => {
 
 describe('FileConfigSchema', () => {
   const validFileConfig = {
+    version: 1,
     connections: [{ name: 'My Bank', refreshToken: 'token', accounts: [] }],
   }
 

@@ -48,6 +48,7 @@ const trueLayerAccountsById = new Map<string, TrueLayerAccount | TrueLayerCard>(
 const baseOptions = {
   connection: baseConnection,
   accessToken: 'access-token',
+  lookbackDays: 14,
   trueLayerAccountsById,
   includeCategoryInNotes: false,
 }
