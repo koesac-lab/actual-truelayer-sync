@@ -15,6 +15,7 @@ interface SyncAccountOptions {
   trueLayerAccountsById: Map<string, TrueLayerAccount | TrueLayerCard>
   includeCategoryInNotes: boolean
   lookbackDays: number
+  lastSyncDate?: string
   dryRun?: boolean
 }
 
@@ -25,16 +26,17 @@ export async function syncAccount({
   trueLayerAccountsById,
   includeCategoryInNotes,
   lookbackDays,
+  lastSyncDate,
   dryRun = false,
 }: SyncAccountOptions): Promise<boolean> {
   const prefix = [connection.name, configAccount.friendlyName]
-  const fromDate = configAccount.lastSyncDate ? computeFromDate(configAccount.lastSyncDate, lookbackDays) : undefined
+  const fromDate = lastSyncDate ? computeFromDate(lastSyncDate, lookbackDays) : undefined
 
   log(prefix, `Fetching transactions${fromDate ? ` since ${fromDate}` : ''}...`)
 
-  const isCard = resolveIsCard(configAccount, connection)
   let trueLayerTransactions: TrueLayerTransaction[]
   try {
+    const isCard = resolveIsCard(configAccount, connection)
     trueLayerTransactions = isCard
       ? await getCardTransactions(accessToken, configAccount.trueLayerId, fromDate)
       : await getAccountTransactions(accessToken, configAccount.trueLayerId, fromDate)

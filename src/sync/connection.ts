@@ -3,14 +3,21 @@ import { syncAccount } from './account'
 import { fetchAccountMap } from './accounts'
 import { currentDate } from '../utils/date'
 import { log, logError } from '../utils/logger'
-import type { Account, Connection, Config } from '../config/schema'
+import { getConnectionState, getAccountLastSyncDate } from '../config/state'
+import type { Connection, Config, ConnectionState } from '../config/schema'
 import type { TrueLayerAccount, TrueLayerCard } from '../truelayer/types'
 
 export async function syncConnection(
   connection: Connection,
   config: Config,
   dryRun = false,
-): Promise<Connection | undefined> {
+): Promise<ConnectionState | undefined> {
+  const connectionState = getConnectionState(config.state, connection.name)
+  if (!connectionState) {
+    logError([connection.name], 'No state entry — skipping. Add this connection to state.json.')
+    return undefined
+  }
+
   const startedAt = Date.now()
   const prefix = [connection.name]
   log(prefix, 'Starting sync, authenticating with TrueLayer...')
@@ -21,7 +28,7 @@ export async function syncConnection(
     const { access_token, refresh_token } = await refreshToken(
       config.env.TRUELAYER_CLIENT_ID,
       config.env.TRUELAYER_CLIENT_SECRET,
-      connection.refreshToken,
+      connectionState.refreshToken,
     )
     accessToken = access_token
     newRefreshToken = refresh_token
@@ -30,7 +37,7 @@ export async function syncConnection(
     return undefined
   }
 
-  const tokenChanged = newRefreshToken !== connection.refreshToken
+  const tokenChanged = newRefreshToken !== connectionState.refreshToken
   log(prefix, `└ Refresh token ${tokenChanged ? 'CHANGED' : 'unchanged'}.`)
 
   let trueLayerAccountsById: Map<string, TrueLayerAccount | TrueLayerCard>
@@ -38,11 +45,17 @@ export async function syncConnection(
     trueLayerAccountsById = await fetchAccountMap(connection, accessToken)
   } catch (err) {
     logError(prefix, 'Sync failed:', err)
-    return { ...connection, refreshToken: newRefreshToken }
+
+    if (tokenChanged) {
+      return { ...connectionState, refreshToken: newRefreshToken }
+    } else {
+      return undefined
+    }
   }
 
-  const updatedAccounts: Account[] = []
+  const updatedAccounts = { ...connectionState.accounts }
   for (const configAccount of connection.accounts) {
+    const lastSyncDate = getAccountLastSyncDate(config.state, connection.name, configAccount.trueLayerId)
     const hadTransactions = await syncAccount({
       configAccount,
       connection,
@@ -50,13 +63,26 @@ export async function syncConnection(
       trueLayerAccountsById,
       includeCategoryInNotes: config.includeCategoryInNotes,
       lookbackDays: config.lookbackDays,
+      lastSyncDate,
       dryRun,
     })
-    updatedAccounts.push(hadTransactions ? { ...configAccount, lastSyncDate: currentDate() } : configAccount)
+
+    if (hadTransactions) {
+      updatedAccounts[configAccount.trueLayerId] = { lastSyncDate: currentDate() }
+    }
   }
 
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
   log(prefix, `Done in ${elapsed}s.`)
 
-  return { ...connection, refreshToken: newRefreshToken, accounts: updatedAccounts }
+  // Dry run only saves state of refresh token changed
+  if (dryRun) {
+    if (tokenChanged) {
+      return { ...connectionState, refreshToken: newRefreshToken }
+    } else {
+      return undefined
+    }
+  }
+
+  return { refreshToken: newRefreshToken, accounts: updatedAccounts }
 }

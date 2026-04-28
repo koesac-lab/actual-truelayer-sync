@@ -11,7 +11,6 @@ vi.mock('../utils/logger')
 
 const baseConnection: Connection = {
   name: 'My Bank',
-  refreshToken: 'token',
   accounts: [{ trueLayerId: 'acc-1', actualId: 'a-1', friendlyName: 'Current Account' }],
 }
 

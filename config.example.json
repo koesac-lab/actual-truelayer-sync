@@ -1,59 +1,55 @@
 {
-  "version": 1,
+  "version": 2,
   "includeCategoryInNotes": false,
   "lookbackDays": 14,
   "connections": [
     {
       "name": "My Bank",
-      "refreshToken": "[TRUELAYER REFRESH TOKEN]",
       "accounts": [
         {
-          "trueLayerId": "[TrueLayer account_id]",
-          "actualId": "[Actual Budget account_id]",
+          "trueLayerId": "[TRUELAYER_ACCOUNT_ID]",
+          "actualId": "[ACTUALBUDGET_ACCOUNT_ID]",
           "friendlyName": "My Current Account"
         },
         {
-          "trueLayerId": "[TrueLayer account_id]",
-          "actualId": "[Actual Budget account_id]",
+          "trueLayerId": "[TRUELAYER_ACCOUNT_ID]",
+          "actualId": "[ACTUALBUDGET_ACCOUNT_ID]",
           "friendlyName": "My Joint Account",
           "flip": true
         },
         {
-          "trueLayerId": "[TrueLayer account_id]",
-          "actualId": "[Actual Budget account_id]",
+          "trueLayerId": "[TRUELAYER_ACCOUNT_ID]",
+          "actualId": "[ACTUALBUDGET_ACCOUNT_ID]",
           "friendlyName": "My Savings Account"
         }
       ]
     },
     {
       "name": "My Credit Card Provider",
-      "refreshToken": "[TRUELAYER REFRESH TOKEN]",
       "isCard": true,
       "accounts": [
         {
-          "trueLayerId": "[TrueLayer account_id]",
-          "actualId": "[Actual Budget account_id]",
+          "trueLayerId": "[TRUELAYER_ACCOUNT_ID]",
+          "actualId": "[ACTUALBUDGET_ACCOUNT_ID]",
           "friendlyName": "My Credit Card"
         }
       ]
     },
     {
       "name": "New Connection (ID Discovery)",
-      "refreshToken": "[TRUELAYER REFRESH TOKEN]",
       "accounts": []
     },
     {
       "name": "Mixed Connection",
-      "refreshToken": "[TRUELAYER REFRESH TOKEN]",
       "accounts": [
         {
-          "trueLayerId": "[TrueLayer account_id]",
-          "actualId": "[Actual Budget account_id]",
+          "trueLayerId": "[TRUELAYER_ACCOUNT_ID]",
+          "actualId": "[ACTUALBUDGET_ACCOUNT_ID]",
           "friendlyName": "My Current Account"
         },
         {
-          "trueLayerId": "[TrueLayer account_id]",
-          "actualId": "[Actual Budget account_id]",
+          "trueLayerId": "[TRUELAYER_ACCOUNT_ID]",
+          "actualId": "[ACTUALBUDGET_ACCOUNT_ID]",
           "friendlyName": "My Credit Card",
           "isCard": true
         }

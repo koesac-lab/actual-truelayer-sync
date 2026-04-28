@@ -1,5 +1,5 @@
 import cron from 'node-cron'
-import { loadConfig, writeConfig } from './config/config'
+import { loadConfig, writeState } from './config/config'
 import { initActual, shutdownActual } from './actual/actual'
 import { syncConnection } from './sync/connection'
 import { log, logError } from './utils/logger'
@@ -16,17 +16,11 @@ async function mainTask(config: Config): Promise<void> {
       verbose: !!config.env.DEBUG,
     })
 
-    for (let i = 0; i < config.connections.length; i++) {
-      const connection = config.connections[i]
-      const updated = await syncConnection(connection, config, dryRun)
-      if (updated) {
-        if (dryRun) {
-          // Save config back for refresh token changes during a dry run
-          config.connections[i] = { ...connection, refreshToken: updated.refreshToken }
-        } else {
-          config.connections[i] = updated
-        }
-        await writeConfig(config)
+    for (const connection of config.connections) {
+      const result = await syncConnection(connection, config, dryRun)
+      if (result) {
+        config.state.connections[connection.name] = result
+        await writeState(config)
       }
     }
   } catch (e) {

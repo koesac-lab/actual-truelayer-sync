@@ -7,12 +7,10 @@ export const AccountSchema = z.object({
   friendlyName: z.string().min(1),
   isCard: z.boolean().optional(),
   flip: z.boolean().optional(),
-  lastSyncDate: z.string().date().optional(),
 })
 
 export const ConnectionSchema = z.object({
   name: z.string().min(1),
-  refreshToken: z.string().min(1),
   isCard: z.boolean().optional(),
   accounts: z.array(AccountSchema),
 })
@@ -44,9 +42,28 @@ export const EnvSchema = z.object({
   LOG_FORMAT: z.enum(['text', 'json']).default('json'),
 })
 
+export const AccountStateSchema = z.object({
+  lastSyncDate: z.string().date().optional(),
+})
+
+export const ConnectionStateSchema = z.object({
+  refreshToken: z.string().min(1),
+  accounts: z.record(z.string(), AccountStateSchema).default({}),
+})
+
+export const StateSchema = z.object({
+  connections: z.record(z.string(), ConnectionStateSchema).default({}),
+})
+
 export type Account = z.infer<typeof AccountSchema>
 export type Connection = z.infer<typeof ConnectionSchema>
 export type FileConfig = z.infer<typeof FileConfigSchema>
-export type Config = z.infer<typeof FileConfigSchema> & {
-  env: z.infer<typeof EnvSchema>
+export type AccountState = z.infer<typeof AccountStateSchema>
+export type ConnectionState = z.infer<typeof ConnectionStateSchema>
+export type Env = z.infer<typeof EnvSchema>
+export type State = z.infer<typeof StateSchema>
+
+export type Config = FileConfig & {
+  env: Env
+  state: State
 }

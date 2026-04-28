@@ -10,7 +10,6 @@ const baseAccount: Account = {
 
 const baseConnection: Connection = {
   name: 'My Bank',
-  refreshToken: 'token',
   accounts: [],
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { AccountSchema, ConnectionSchema, EnvSchema, FileConfigSchema } from './schema'
+import { AccountSchema, ConnectionSchema, EnvSchema, FileConfigSchema, StateSchema } from './schema'
 
 describe('AccountSchema', () => {
   const validAccount = {
@@ -12,13 +12,8 @@ describe('AccountSchema', () => {
     expect(AccountSchema.safeParse(validAccount).success).toBe(true)
   })
 
-  it('accepts optional isCard, flip, and lastSyncDate', () => {
-    const result = AccountSchema.safeParse({
-      ...validAccount,
-      isCard: true,
-      flip: false,
-      lastSyncDate: '2026-04-24',
-    })
+  it('accepts optional isCard and flip', () => {
+    const result = AccountSchema.safeParse({ ...validAccount, isCard: true, flip: false })
     expect(result.success).toBe(true)
   })
 
@@ -41,10 +36,6 @@ describe('AccountSchema', () => {
     expect(AccountSchema.safeParse(rest).success).toBe(false)
   })
 
-  it('rejects an invalid lastSyncDate format', () => {
-    expect(AccountSchema.safeParse({ ...validAccount, lastSyncDate: '24-04-2026' }).success).toBe(false)
-  })
-
   it('rejects a non-boolean flip', () => {
     expect(AccountSchema.safeParse({ ...validAccount, flip: 'yes' }).success).toBe(false)
   })
@@ -53,7 +44,6 @@ describe('AccountSchema', () => {
 describe('ConnectionSchema', () => {
   const validConnection = {
     name: 'My Bank',
-    refreshToken: 'token-abc',
     accounts: [],
   }
 
@@ -77,21 +67,12 @@ describe('ConnectionSchema', () => {
     const { name: _, ...rest } = validConnection
     expect(ConnectionSchema.safeParse(rest).success).toBe(false)
   })
-
-  it('rejects missing refreshToken', () => {
-    const { refreshToken: _, ...rest } = validConnection
-    expect(ConnectionSchema.safeParse(rest).success).toBe(false)
-  })
-
-  it('rejects empty refreshToken', () => {
-    expect(ConnectionSchema.safeParse({ ...validConnection, refreshToken: '' }).success).toBe(false)
-  })
 })
 
 describe('FileConfigSchema', () => {
   const validFileConfig = {
-    version: 1,
-    connections: [{ name: 'My Bank', refreshToken: 'token', accounts: [] }],
+    version: 2,
+    connections: [{ name: 'My Bank', accounts: [] }],
   }
 
   it('accepts a valid file config', () => {
@@ -111,7 +92,7 @@ describe('FileConfigSchema', () => {
   })
 
   it('rejects empty connections array', () => {
-    expect(FileConfigSchema.safeParse({ connections: [] }).success).toBe(false)
+    expect(FileConfigSchema.safeParse({ ...validFileConfig, connections: [] }).success).toBe(false)
   })
 
   it('rejects missing connections', () => {
@@ -122,8 +103,8 @@ describe('FileConfigSchema', () => {
     const result = FileConfigSchema.safeParse({
       ...validFileConfig,
       connections: [
-        { name: 'My Bank', refreshToken: 'token-1', accounts: [] },
-        { name: 'My Bank', refreshToken: 'token-2', accounts: [] },
+        { name: 'My Bank', accounts: [] },
+        { name: 'My Bank', accounts: [] },
       ],
     })
     expect(result.success).toBe(false)
@@ -133,11 +114,60 @@ describe('FileConfigSchema', () => {
     const result = FileConfigSchema.safeParse({
       ...validFileConfig,
       connections: [
-        { name: 'My Bank', refreshToken: 'token-1', accounts: [] },
-        { name: 'My Credit Card', refreshToken: 'token-2', accounts: [] },
+        { name: 'My Bank', accounts: [] },
+        { name: 'My Credit Card', accounts: [] },
       ],
     })
     expect(result.success).toBe(true)
+  })
+})
+
+describe('StateSchema', () => {
+  it('defaults to empty connections when not provided', () => {
+    const result = StateSchema.safeParse({})
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.connections).toEqual({})
+  })
+
+  it('accepts a valid state with connections', () => {
+    const result = StateSchema.safeParse({
+      connections: {
+        'My Bank': {
+          refreshToken: 'live-token',
+          accounts: {
+            'tl-acc-1': { lastSyncDate: '2026-04-27' },
+          },
+        },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('defaults accounts to empty object when not provided', () => {
+    const result = StateSchema.safeParse({
+      connections: { 'My Bank': { refreshToken: 'token' } },
+    })
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.connections['My Bank']?.accounts).toEqual({})
+  })
+
+  it('rejects a connection with missing refreshToken', () => {
+    const result = StateSchema.safeParse({
+      connections: { 'My Bank': { accounts: {} } },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects an invalid lastSyncDate format', () => {
+    const result = StateSchema.safeParse({
+      connections: {
+        'My Bank': {
+          refreshToken: 'token',
+          accounts: { 'tl-acc-1': { lastSyncDate: '24-04-2026' } },
+        },
+      },
+    })
+    expect(result.success).toBe(false)
   })
 })
 

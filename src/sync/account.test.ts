@@ -11,7 +11,6 @@ vi.mock('../utils/logger')
 
 const baseConnection: Connection = {
   name: 'My Bank',
-  refreshToken: 'token',
   accounts: [],
 }
 
@@ -76,11 +75,11 @@ describe('syncAccount', () => {
     expect(truelayer.getAccountTransactions).not.toHaveBeenCalled()
   })
 
-  it('passes fromDate based on lastSyncDate', async () => {
+  it('passes fromDate when lastSyncDate is provided', async () => {
     vi.mocked(truelayer.getAccountTransactions).mockResolvedValueOnce([mockTransaction])
     vi.mocked(actual.importTransactions).mockResolvedValueOnce({ added: [], updated: [] })
 
-    await syncAccount({ ...baseOptions, configAccount: { ...baseAccount, lastSyncDate: '2026-04-24' } })
+    await syncAccount({ ...baseOptions, configAccount: baseAccount, lastSyncDate: '2026-04-24' })
 
     expect(truelayer.getAccountTransactions).toHaveBeenCalledWith('access-token', 'acc-1', '2026-04-10')
   })
