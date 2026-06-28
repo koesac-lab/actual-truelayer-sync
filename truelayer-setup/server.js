@@ -11,6 +11,10 @@ const PORT = process.env.PORT || 3099;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 
+// If REDIRECT_URI is set explicitly (recommended), use that.
+// Otherwise derive from the incoming request (works for direct IP access).
+const EXPLICIT_REDIRECT_URI = process.env.REDIRECT_URI || null;
+
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return { version: 2, connections: [] };
   try {
@@ -40,10 +44,11 @@ function saveState(st) {
   fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2));
 }
 
-function getBaseUrl(req) {
+function getRedirectUri(req) {
+  if (EXPLICIT_REDIRECT_URI) return EXPLICIT_REDIRECT_URI;
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   const host = req.headers['x-forwarded-host'] || req.get('host');
-  return `${proto}://${host}`;
+  return `${proto}://${host}/callback`;
 }
 
 async function getAccessToken(name) {
@@ -69,6 +74,7 @@ async function getAccessToken(name) {
 app.get('/', (req, res) => {
   const config = loadConfig();
   const state = loadState();
+  const redirectUri = getRedirectUri(req);
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -83,22 +89,28 @@ app.get('/', (req, res) => {
     .card { background: white; border: 1px solid #ddd; padding: 16px; margin: 12px 0; border-radius: 6px; }
     .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; background: #e8f0fe; color: #1a73e8; margin-left: 6px; }
     a.btn { display: inline-block; padding: 6px 14px; background: #444; color: white; text-decoration: none; border-radius: 4px; font-size: 0.9em; margin-top: 8px; }
+    .info { background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 10px 14px; margin-bottom: 16px; font-size: 0.9em; border-radius: 0 4px 4px 0; }
+    code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
   </style>
 </head>
 <body>
   <h1>&#127974; TrueLayer &rarr; Actual Budget Setup</h1>
 
+  <div class="info">
+    Redirect URI registered in TrueLayer Console must be exactly:<br>
+    <code>${redirectUri}</code>
+  </div>
+
   <div class="card">
     <h2>Add Bank Connection</h2>
+    <p>You'll be sent to TrueLayer to choose and authorise your bank. The connection will be named automatically from your bank after authorisation.</p>
     <form action="/start-auth" method="POST">
-      <label>Connection Name</label>
-      <input name="name" placeholder="e.g. Monzo, Barclays, Amex" required>
-      <label>Type</label>
+      <label>Account Type</label>
       <select name="isCard">
         <option value="false">Bank Account</option>
         <option value="true">Credit Card</option>
       </select>
-      <button type="submit">Start OAuth Flow &rarr;</button>
+      <button type="submit">Connect a Bank &rarr;</button>
     </form>
   </div>
 
@@ -113,6 +125,7 @@ app.get('/', (req, res) => {
       </span>
       <br><br>
       ${hasToken ? `<a class="btn" href="/accounts/${encodeURIComponent(c.name)}">View / Map Accounts</a>` : ''}
+      <a class="btn" style="background:#c5221f" href="/delete/${encodeURIComponent(c.name)}">Remove</a>
     </div>`;
   }).join('')}
 </body>
@@ -121,20 +134,17 @@ app.get('/', (req, res) => {
 
 // ── Start OAuth ───────────────────────────────────────────────────────────────
 app.post('/start-auth', (req, res) => {
-  const { name, isCard } = req.body;
+  const { isCard } = req.body;
   const clientId = process.env.TRUELAYER_CLIENT_ID;
   if (!clientId) return res.status(500).send('TRUELAYER_CLIENT_ID not set');
 
-  const config = loadConfig();
-  if (!config.connections.find(c => c.name === name)) {
-    config.connections.push({ name, isCard: isCard === 'true', accounts: [] });
-    saveConfig(config);
-  }
-
-  const redirectUri = `${getBaseUrl(req)}/callback`;
+  const redirectUri = getRedirectUri(req);
   const scope = isCard === 'true'
     ? 'cards balance transactions offline_access'
     : 'accounts balance transactions offline_access';
+
+  // Pass isCard in state so we know the type after callback
+  const stateParam = JSON.stringify({ isCard: isCard === 'true' });
 
   const url = `https://auth.truelayer.com/?${new URLSearchParams({
     response_type: 'code',
@@ -143,19 +153,28 @@ app.post('/start-auth', (req, res) => {
     redirect_uri: redirectUri,
     providers: 'uk-ob-all uk-oauth-all',
     response_mode: 'query',
-    state: name
+    state: stateParam
   })}`;
 
+  console.log('Redirecting to TrueLayer, redirect_uri:', redirectUri);
   res.redirect(url);
 });
 
 // ── OAuth Callback ────────────────────────────────────────────────────────────
 app.get('/callback', async (req, res) => {
-  const { code, state: name } = req.query;
-  if (!code || !name) return res.status(400).send('Missing code or state');
+  const { code, state: stateParam } = req.query;
+  if (!code) return res.status(400).send('Missing authorisation code');
+
+  let isCard = false;
+  try {
+    const parsed = JSON.parse(stateParam || '{}');
+    isCard = parsed.isCard || false;
+  } catch (_) {}
 
   try {
-    const redirectUri = `${getBaseUrl(req)}/callback`;
+    const redirectUri = getRedirectUri(req);
+    console.log('Exchanging code, redirect_uri:', redirectUri);
+
     const tokenRes = await fetch('https://auth.truelayer.com/connect/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -171,17 +190,48 @@ app.get('/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenData.refresh_token) throw new Error('No refresh token: ' + JSON.stringify(tokenData));
 
+    // Fetch the bank name from TrueLayer metadata
+    const endpoint = isCard ? 'cards' : 'accounts';
+    const accountsRes = await fetch(`https://api.truelayer.com/data/v1/${endpoint}`, {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const accountsData = await accountsRes.json();
+    const firstAccount = (accountsData.results || [])[0];
+    const bankName = firstAccount ? (firstAccount.provider ? firstAccount.provider.display_name : firstAccount.display_name) : `Bank-${Date.now()}`;
+    const connName = bankName.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+
+    // Save token
     const state = loadState();
-    state.connections[name] = { refreshToken: tokenData.refresh_token, lastSync: null };
+    state.connections[connName] = { refreshToken: tokenData.refresh_token, lastSync: null };
     saveState(state);
 
+    // Save connection in config
+    const config = loadConfig();
+    if (!config.connections.find(c => c.name === connName)) {
+      config.connections.push({ name: connName, isCard, accounts: [] });
+      saveConfig(config);
+    }
+
     res.send(`<!DOCTYPE html><html><body style="font-family:system-ui;max-width:600px;margin:40px auto;padding:0 20px">
-      <h1>&#9989; ${name} connected!</h1>
-      <p>Token saved. Now <a href="/accounts/${encodeURIComponent(name)}">view and map accounts &rarr;</a></p>
+      <h1>&#9989; ${connName} connected!</h1>
+      <p>Token saved. Now <a href="/accounts/${encodeURIComponent(connName)}">view and map accounts &rarr;</a></p>
     </body></html>`);
   } catch (err) {
-    res.status(500).send('Error: ' + err.message);
+    console.error('Callback error:', err);
+    res.status(500).send(`Error: ${err.message}<br><a href="/">&larr; Back</a>`);
   }
+});
+
+// ── Delete connection ─────────────────────────────────────────────────────────────
+app.get('/delete/:name', (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  const config = loadConfig();
+  config.connections = config.connections.filter(c => c.name !== name);
+  saveConfig(config);
+  const state = loadState();
+  delete state.connections[name];
+  saveState(state);
+  res.redirect('/');
 });
 
 // ── Account Discovery & Mapping ───────────────────────────────────────────────
@@ -277,4 +327,7 @@ app.post('/save-mapping/:name', (req, res) => {
   </body></html>`);
 });
 
-app.listen(PORT, () => console.log(`Setup UI running on http://0.0.0.0:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Setup UI running on http://0.0.0.0:${PORT}`);
+  console.log(`Redirect URI: ${EXPLICIT_REDIRECT_URI || '(derived from request)'}`);
+});
