@@ -11,14 +11,20 @@ const PORT = process.env.PORT || 3099;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 
-// Set this to whatever URL you registered in TrueLayer Console
-// e.g. REDIRECT_URI=http://192.168.1.215:3099/callback
 const REDIRECT_URI = process.env.REDIRECT_URI;
 if (!REDIRECT_URI) {
   console.error('ERROR: REDIRECT_URI env var is not set.');
-  console.error('Set it to the callback URL you registered in TrueLayer Console.');
-  console.error('e.g. REDIRECT_URI=http://192.168.1.215:3099/callback');
+  console.error('e.g. REDIRECT_URI=https://truelayer.alexkoester.com/callback');
   process.exit(1);
+}
+
+const CLIENT_ID = process.env.TRUELAYER_CLIENT_ID || '';
+const CLIENT_SECRET = process.env.TRUELAYER_CLIENT_SECRET || '';
+
+function maskSecret(s) {
+  if (!s) return '(not set)';
+  if (s.length <= 8) return '****';
+  return s.slice(0, 4) + '...' + s.slice(-4);
 }
 
 function loadConfig() {
@@ -68,16 +74,24 @@ app.get('/', (req, res) => {
     .card { background: white; border: 1px solid #ddd; padding: 16px; margin: 12px 0; border-radius: 6px; }
     .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; background: #e8f0fe; color: #1a73e8; margin-left: 6px; }
     a.btn { display: inline-block; padding: 6px 14px; background: #444; color: white; text-decoration: none; border-radius: 4px; font-size: 0.9em; margin-top: 8px; margin-right: 6px; }
-    .info { background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 10px 14px; margin-bottom: 16px; font-size: 0.9em; border-radius: 0 4px 4px 0; }
-    code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+    .info { background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 12px 16px; margin-bottom: 16px; font-size: 0.9em; border-radius: 0 4px 4px 0; line-height: 1.8; }
+    .info.warn { background: #fce8e6; border-left-color: #c5221f; }
+    code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; font-family: monospace; }
+    table.env { width: 100%; border-collapse: collapse; margin-top: 4px; }
+    table.env td { padding: 4px 8px; }
+    table.env td:first-child { font-weight: 600; width: 140px; color: #555; }
   </style>
 </head>
 <body>
   <h1>&#127974; TrueLayer &rarr; Actual Budget Setup</h1>
 
-  <div class="info">
-    Redirect URI (register this once in <a href="https://console.truelayer.com" target="_blank">TrueLayer Console</a>):<br>
-    <code>${REDIRECT_URI}</code>
+  <div class="info${!CLIENT_ID || !CLIENT_SECRET ? ' warn' : ''}">
+    <table class="env">
+      <tr><td>Client ID</td><td><code>${CLIENT_ID || '(not set)'}</code></td></tr>
+      <tr><td>Client Secret</td><td><code>${maskSecret(CLIENT_SECRET)}</code></td></tr>
+      <tr><td>Redirect URI</td><td><code>${REDIRECT_URI}</code></td></tr>
+    </table>
+    ${!CLIENT_ID || !CLIENT_SECRET ? '<br>&#9888;&#65039; <strong>Missing credentials — check your .env file.</strong>' : ''}
   </div>
 
   <div class="card">
@@ -114,8 +128,7 @@ app.get('/', (req, res) => {
 // ── Start OAuth ───────────────────────────────────────────────────────────────
 app.post('/start-auth', (req, res) => {
   const { isCard } = req.body;
-  const clientId = process.env.TRUELAYER_CLIENT_ID;
-  if (!clientId) return res.status(500).send('TRUELAYER_CLIENT_ID not set');
+  if (!CLIENT_ID) return res.status(500).send('TRUELAYER_CLIENT_ID not set. <a href="/">Back</a>');
 
   const scope = isCard === 'true'
     ? 'cards balance transactions offline_access'
@@ -125,7 +138,7 @@ app.post('/start-auth', (req, res) => {
 
   const url = `https://auth.truelayer.com/?${new URLSearchParams({
     response_type: 'code',
-    client_id: clientId,
+    client_id: CLIENT_ID,
     scope,
     redirect_uri: REDIRECT_URI,
     providers: 'uk-ob-all uk-oauth-all',
@@ -153,8 +166,8 @@ app.get('/callback', async (req, res) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
-        client_id: process.env.TRUELAYER_CLIENT_ID,
-        client_secret: process.env.TRUELAYER_CLIENT_SECRET,
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
         redirect_uri: REDIRECT_URI,
         code
       })
@@ -227,8 +240,8 @@ app.get('/accounts/:name', async (req, res) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         grant_type: 'refresh_token',
-        client_id: process.env.TRUELAYER_CLIENT_ID,
-        client_secret: process.env.TRUELAYER_CLIENT_SECRET,
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
         refresh_token: connState.refreshToken
       })
     });
@@ -320,5 +333,7 @@ app.post('/save-mapping/:name', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Setup UI running on http://0.0.0.0:${PORT}`);
+  console.log(`Client ID: ${CLIENT_ID || '(not set)'}`);
+  console.log(`Client Secret: ${maskSecret(CLIENT_SECRET)}`);
   console.log(`Redirect URI: ${REDIRECT_URI}`);
 });
