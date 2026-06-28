@@ -14,7 +14,7 @@ const STATE_PATH = path.join(DATA_DIR, 'state.json');
 const REDIRECT_URI = process.env.REDIRECT_URI;
 if (!REDIRECT_URI) {
   console.error('ERROR: REDIRECT_URI env var is not set.');
-  console.error('e.g. REDIRECT_URI=https://truelayer.alexkoester.com/callback');
+  console.error('e.g. REDIRECT_URI=https://truelayer.example.com/callback');
   process.exit(1);
 }
 
@@ -22,6 +22,7 @@ const RAW_CLIENT_ID = process.env.TRUELAYER_CLIENT_ID || '';
 const CLIENT_SECRET  = process.env.TRUELAYER_CLIENT_SECRET || '';
 const SANDBOX = (process.env.TRUELAYER_ENV || '').toLowerCase() === 'sandbox';
 
+// In sandbox mode TrueLayer requires the client_id prefixed with "sandbox-"
 const CLIENT_ID = SANDBOX && RAW_CLIENT_ID && !RAW_CLIENT_ID.startsWith('sandbox-')
   ? `sandbox-${RAW_CLIENT_ID}`
   : RAW_CLIENT_ID;
@@ -126,7 +127,7 @@ app.get('/', (req, res) => {
 
   <div class="card">
     <h2>Add Bank Connection</h2>
-    <p>You'll be redirected to TrueLayer to choose and authorise your bank. The connection name is set automatically.</p>
+    <p>You\'ll be redirected to TrueLayer to choose and authorise your bank. The connection name is set automatically.</p>
     <form action="/start-auth" method="POST">
       <label>Account Type</label>
       <select name="isCard">
@@ -217,8 +218,9 @@ app.get('/callback', async (req, res) => {
       : 'Bank-' + Date.now();
     const connName = bankName.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
 
+    // Write state matching ConnectionStateSchema: { refreshToken, accounts: {} }
     const state = loadState();
-    state.connections[connName] = { refreshToken: tokenData.refresh_token, lastSync: null };
+    state.connections[connName] = { refreshToken: tokenData.refresh_token, accounts: {} };
     saveState(state);
 
     const config = loadConfig();
@@ -238,7 +240,7 @@ app.get('/callback', async (req, res) => {
   }
 });
 
-// ── Delete connection ─────────────────────────────────────────────────────────────
+// ── Delete connection ─────────────────────────────────────────────────────────
 app.get('/delete/:name', (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
@@ -283,7 +285,6 @@ app.get('/accounts/:name', async (req, res) => {
     const accounts = apiData.results || [];
 
     const allIds   = accounts.map(a => a.account_id).join(',');
-    const allNames = accounts.map(a => encodeURIComponent(a.display_name || a.account_type)).join(',');
 
     const rows = accounts.map(acc => {
       const existing = conn.accounts.find(a => a.trueLayerId === acc.account_id);
@@ -310,6 +311,7 @@ app.get('/accounts/:name', async (req, res) => {
     a { color: #0066cc; }
     code { background: #f4f4f4; padding: 2px 4px; border-radius: 3px; }
     .hint { font-size: 0.85em; color: #666; margin-bottom: 12px; }
+    .warn { background: #fff3cd; border: 1px solid #ffc107; padding: 10px 14px; border-radius: 4px; margin-top: 12px; font-size: 0.9em; display: none; }
   </style>
 </head>
 <body>
@@ -318,7 +320,7 @@ app.get('/accounts/:name', async (req, res) => {
     Find your <strong>Actual Budget account ID</strong> in Actual: Settings &rarr; click an account &rarr; the ID is in the URL or shown under Advanced.<br>
     <strong>Friendly Name</strong> is used in sync logs. <strong>Flip</strong> inverts transaction amounts (useful for credit cards shown as positive).
   </p>
-  <form action="/save-mapping/${encodeURIComponent(name)}" method="POST">
+  <form action="/save-mapping/${encodeURIComponent(name)}" method="POST" onsubmit="return validateForm(event)">
     <table>
       <tr>
         <th>Bank Account</th>
@@ -329,9 +331,22 @@ app.get('/accounts/:name', async (req, res) => {
       </tr>
       ${rows}
     </table>
+    <div class="warn" id="warn">&#9888;&#65039; No accounts have an Actual Budget ID filled in. At least one is required to save — otherwise the sync container will crash on startup.</div>
     <input type="hidden" name="allIds" value="${allIds}">
     <button type="submit">&#128190; Save Mappings</button>
   </form>
+  <script>
+    function validateForm(e) {
+      const ids = document.querySelectorAll('input[name^="actualId_"]');
+      const any = Array.from(ids).some(i => i.value.trim());
+      if (!any) {
+        e.preventDefault();
+        document.getElementById('warn').style.display = 'block';
+        return false;
+      }
+      return true;
+    }
+  </script>
   <br><a href="/">&larr; Back</a>
 </body>
 </html>`);
@@ -348,8 +363,7 @@ app.post('/save-mapping/:name', (req, res) => {
 
   const ids = req.body.allIds.split(',').filter(Boolean);
 
-  // Only save accounts that have an actualId
-  conn.accounts = ids
+  const mapped = ids
     .map(id => {
       const actualId     = (req.body[`actualId_${id}`] || '').trim();
       const friendlyName = (req.body[`friendlyName_${id}`] || '').trim();
@@ -358,7 +372,15 @@ app.post('/save-mapping/:name', (req, res) => {
     })
     .filter(a => a.actualId && a.friendlyName);
 
+  if (mapped.length === 0) {
+    return res.status(400).send(`<h1>&#9888;&#65039; Nothing saved</h1>
+      <p>No accounts had an Actual Budget ID filled in. The sync container requires at least one mapped account.</p>
+      <p><a href="/accounts/${encodeURIComponent(name)}">&larr; Go back and fill in the IDs</a></p>`);
+  }
+
+  conn.accounts = mapped;
   saveConfig(config);
+
   res.send(`<!DOCTYPE html><html><body style="font-family:system-ui;max-width:600px;margin:40px auto;padding:0 20px">
     <h1>&#9989; Mappings saved!</h1>
     <p>Saved ${conn.accounts.length} account mapping(s) for <strong>${name}</strong>.</p>

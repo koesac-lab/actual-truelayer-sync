@@ -30,6 +30,7 @@ export const FileConfigSchema = z
 export const EnvSchema = z.object({
   TRUELAYER_CLIENT_ID: z.string().min(1),
   TRUELAYER_CLIENT_SECRET: z.string().min(1),
+  TRUELAYER_ENV: z.enum(['live', 'sandbox']).default('live'),
   ACTUAL_SERVER_URL: z.url(),
   ACTUAL_SERVER_PASSWORD: z.string().min(1),
   ACTUAL_SYNC_ID: z.uuid(),

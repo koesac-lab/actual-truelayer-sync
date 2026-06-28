@@ -2,8 +2,26 @@ import axios from 'axios'
 import type { TrueLayerAccount, TrueLayerCard, TrueLayerMe, TrueLayerTransaction, TrueLayerTokenResponse } from './types'
 import { NETWORK_TIMEOUT } from '../utils/network'
 
-const BASE_URL = 'https://api.truelayer.com/data/v1'
-const AUTH_URL = 'https://auth.truelayer.com/connect/token'
+const SANDBOX = (process.env.TRUELAYER_ENV ?? '').toLowerCase() === 'sandbox'
+
+const BASE_URL = SANDBOX
+  ? 'https://api.truelayer-sandbox.com/data/v1'
+  : 'https://api.truelayer.com/data/v1'
+
+const AUTH_URL = SANDBOX
+  ? 'https://auth.truelayer-sandbox.com/connect/token'
+  : 'https://auth.truelayer.com/connect/token'
+
+/**
+ * In sandbox mode TrueLayer requires the client_id to be prefixed with "sandbox-".
+ * This helper ensures it is always correct regardless of what is set in the env.
+ */
+function resolveClientId(clientId: string): string {
+  if (SANDBOX && !clientId.startsWith('sandbox-')) {
+    return `sandbox-${clientId}`
+  }
+  return clientId
+}
 
 function sanitiseTrueLayerError(err: unknown): never {
   if (axios.isAxiosError(err)) {
@@ -25,7 +43,7 @@ export async function exchangeCode(
       AUTH_URL,
       new URLSearchParams({
         grant_type: 'authorization_code',
-        client_id: clientId,
+        client_id: resolveClientId(clientId),
         client_secret: clientSecret,
         code,
         redirect_uri: redirectUri,
@@ -48,7 +66,7 @@ export async function refreshToken(
       AUTH_URL,
       new URLSearchParams({
         grant_type: 'refresh_token',
-        client_id: clientId,
+        client_id: resolveClientId(clientId),
         client_secret: clientSecret,
         refresh_token: refreshToken,
       }).toString(),

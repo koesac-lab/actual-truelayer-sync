@@ -15,6 +15,9 @@ services:
       - TRUELAYER_CLIENT_ID=[TRUELAYER_CLIENT_ID]
       - TRUELAYER_CLIENT_SECRET=[TRUELAYER_CLIENT_SECRET]
       - CRON_SCHEDULE=0 */4 * * * # Example: Every 4 hours
+      # Uncomment to use TrueLayer's sandbox environment with mock bank data.
+      # The client_id is automatically prefixed with "sandbox-" if needed.
+      # - TRUELAYER_ENV=sandbox
     healthcheck:
       # Health check that state.json has been modified recently, indicating the sync is running successfully.
       # 300 minutes (5 hours) against a 4-hour schedule — gives an hour of buffer
@@ -27,16 +30,19 @@ services:
   # ── Setup UI (run on-demand only, never starts with normal `docker compose up`) ──
   # Usage:
   #   docker compose --profile setup up -d truelayer-setup
-  #   Open http://<your-server>:3000, complete OAuth, map accounts
+  #   Open http://<your-server>:3099, complete OAuth, map accounts
   #   docker compose --profile setup down truelayer-setup
   truelayer-setup:
     build: ./truelayer-setup
     container_name: truelayer-setup
     ports:
-      - "3000:3000"
+      - "3099:3099"
     environment:
       - TRUELAYER_CLIENT_ID=[TRUELAYER_CLIENT_ID]
       - TRUELAYER_CLIENT_SECRET=[TRUELAYER_CLIENT_SECRET]
+      - REDIRECT_URI=http://[HOST_IP]:3099/callback
+      # Uncomment to use TrueLayer's sandbox environment.
+      # - TRUELAYER_ENV=sandbox
     volumes:
       - ./actual-truelayer-sync/data:/app/data # Shared with actual-truelayer-sync
     profiles:
