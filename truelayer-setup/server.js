@@ -11,7 +11,15 @@ const PORT = process.env.PORT || 3099;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 
-const TRUELAYER_REDIRECT_URI = 'https://console.truelayer.com/redirect-page';
+// Set this to whatever URL you registered in TrueLayer Console
+// e.g. REDIRECT_URI=http://192.168.1.215:3099/callback
+const REDIRECT_URI = process.env.REDIRECT_URI;
+if (!REDIRECT_URI) {
+  console.error('ERROR: REDIRECT_URI env var is not set.');
+  console.error('Set it to the callback URL you registered in TrueLayer Console.');
+  console.error('e.g. REDIRECT_URI=http://192.168.1.215:3099/callback');
+  process.exit(1);
+}
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return { version: 2, connections: [] };
@@ -60,25 +68,29 @@ app.get('/', (req, res) => {
     .card { background: white; border: 1px solid #ddd; padding: 16px; margin: 12px 0; border-radius: 6px; }
     .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; background: #e8f0fe; color: #1a73e8; margin-left: 6px; }
     a.btn { display: inline-block; padding: 6px 14px; background: #444; color: white; text-decoration: none; border-radius: 4px; font-size: 0.9em; margin-top: 8px; margin-right: 6px; }
-    #status { margin-top: 16px; padding: 12px; border-radius: 4px; display: none; }
-    #status.loading { background: #e8f0fe; color: #1a73e8; display: block; }
-    #status.success { background: #e6f4ea; color: #137333; display: block; }
-    #status.error { background: #fce8e6; color: #c5221f; display: block; }
+    .info { background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 10px 14px; margin-bottom: 16px; font-size: 0.9em; border-radius: 0 4px 4px 0; }
+    code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
   </style>
 </head>
 <body>
   <h1>&#127974; TrueLayer &rarr; Actual Budget Setup</h1>
 
+  <div class="info">
+    Redirect URI (register this once in <a href="https://console.truelayer.com" target="_blank">TrueLayer Console</a>):<br>
+    <code>${REDIRECT_URI}</code>
+  </div>
+
   <div class="card">
     <h2>Add Bank Connection</h2>
-    <p>A TrueLayer popup will open for you to choose and authorise your bank. The connection will be named automatically from your bank name.</p>
-    <label>Account Type</label>
-    <select id="isCard">
-      <option value="false">Bank Account</option>
-      <option value="true">Credit Card</option>
-    </select>
-    <button onclick="startAuth()">Connect a Bank &rarr;</button>
-    <div id="status"></div>
+    <p>You'll be redirected to TrueLayer to choose and authorise your bank. The connection name is set automatically from your bank.</p>
+    <form action="/start-auth" method="POST">
+      <label>Account Type</label>
+      <select name="isCard">
+        <option value="false">Bank Account</option>
+        <option value="true">Credit Card</option>
+      </select>
+      <button type="submit">Connect a Bank &rarr;</button>
+    </form>
   </div>
 
   <h2>Existing Connections</h2>
@@ -95,78 +107,39 @@ app.get('/', (req, res) => {
       <a class="btn" style="background:#c5221f" href="/delete/${encodeURIComponent(c.name)}">Remove</a>
     </div>`;
   }).join('')}
-
-  <script>
-    const CLIENT_ID = '${process.env.TRUELAYER_CLIENT_ID || ''}';
-    const REDIRECT_URI = '${TRUELAYER_REDIRECT_URI}';
-
-    function startAuth() {
-      const isCard = document.getElementById('isCard').value === 'true';
-      const scope = isCard
-        ? 'cards balance transactions offline_access'
-        : 'accounts balance transactions offline_access';
-
-      const state = JSON.stringify({ isCard });
-      const params = new URLSearchParams({
-        response_type: 'code',
-        client_id: CLIENT_ID,
-        scope,
-        redirect_uri: REDIRECT_URI,
-        providers: 'uk-ob-all uk-oauth-all',
-        response_mode: 'query',
-        state
-      });
-
-      const authUrl = 'https://auth.truelayer.com/?' + params.toString();
-      const popup = window.open(authUrl, 'truelayer-auth', 'width=500,height=700,scrollbars=yes');
-
-      setStatus('loading', 'Waiting for authorisation...');
-
-      window.addEventListener('message', async function handler(event) {
-        if (event.origin !== 'https://console.truelayer.com') return;
-        window.removeEventListener('message', handler);
-        if (popup) popup.close();
-
-        const { code, state: stateStr } = event.data || {};
-        if (!code) {
-          setStatus('error', 'No authorisation code received. Please try again.');
-          return;
-        }
-
-        setStatus('loading', 'Exchanging code for token...');
-        try {
-          const resp = await fetch('/exchange', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code, state: stateStr })
-          });
-          const result = await resp.json();
-          if (result.ok) {
-            setStatus('success', '&#9989; ' + result.name + ' connected! <a href="/accounts/' + encodeURIComponent(result.name) + '">Map accounts &rarr;</a>');
-            setTimeout(() => location.reload(), 2000);
-          } else {
-            setStatus('error', 'Error: ' + result.error);
-          }
-        } catch (err) {
-          setStatus('error', 'Error: ' + err.message);
-        }
-      });
-    }
-
-    function setStatus(type, msg) {
-      const el = document.getElementById('status');
-      el.className = type;
-      el.innerHTML = msg;
-    }
-  </script>
 </body>
 </html>`);
 });
 
-// ── Token Exchange (called by browser JS after postMessage) ───────────────────
-app.post('/exchange', async (req, res) => {
-  const { code, state: stateParam } = req.body;
-  if (!code) return res.json({ ok: false, error: 'Missing code' });
+// ── Start OAuth ───────────────────────────────────────────────────────────────
+app.post('/start-auth', (req, res) => {
+  const { isCard } = req.body;
+  const clientId = process.env.TRUELAYER_CLIENT_ID;
+  if (!clientId) return res.status(500).send('TRUELAYER_CLIENT_ID not set');
+
+  const scope = isCard === 'true'
+    ? 'cards balance transactions offline_access'
+    : 'accounts balance transactions offline_access';
+
+  const stateParam = JSON.stringify({ isCard: isCard === 'true' });
+
+  const url = `https://auth.truelayer.com/?${new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    scope,
+    redirect_uri: REDIRECT_URI,
+    providers: 'uk-ob-all uk-oauth-all',
+    response_mode: 'query',
+    state: stateParam
+  })}`;
+
+  res.redirect(url);
+});
+
+// ── OAuth Callback ────────────────────────────────────────────────────────────
+app.get('/callback', async (req, res) => {
+  const { code, state: stateParam } = req.query;
+  if (!code) return res.status(400).send('Missing authorisation code. <a href="/">Try again</a>');
 
   let isCard = false;
   try {
@@ -182,17 +155,15 @@ app.post('/exchange', async (req, res) => {
         grant_type: 'authorization_code',
         client_id: process.env.TRUELAYER_CLIENT_ID,
         client_secret: process.env.TRUELAYER_CLIENT_SECRET,
-        redirect_uri: TRUELAYER_REDIRECT_URI,
+        redirect_uri: REDIRECT_URI,
         code
       })
     });
 
     const tokenData = await tokenRes.json();
-    if (!tokenData.refresh_token) {
-      return res.json({ ok: false, error: 'No refresh token: ' + JSON.stringify(tokenData) });
-    }
+    if (!tokenData.refresh_token) throw new Error('No refresh token: ' + JSON.stringify(tokenData));
 
-    // Fetch bank name from TrueLayer
+    // Fetch bank name
     const endpoint = isCard ? 'cards' : 'accounts';
     const accountsRes = await fetch(`https://api.truelayer.com/data/v1/${endpoint}`, {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
@@ -209,17 +180,21 @@ app.post('/exchange', async (req, res) => {
     state.connections[connName] = { refreshToken: tokenData.refresh_token, lastSync: null };
     saveState(state);
 
-    // Save connection in config
+    // Save config entry
     const config = loadConfig();
     if (!config.connections.find(c => c.name === connName)) {
       config.connections.push({ name: connName, isCard, accounts: [] });
       saveConfig(config);
     }
 
-    res.json({ ok: true, name: connName });
+    res.send(`<!DOCTYPE html><html><body style="font-family:system-ui;max-width:600px;margin:40px auto;padding:0 20px">
+      <h1>&#9989; ${connName} connected!</h1>
+      <p>Token saved. Now <a href="/accounts/${encodeURIComponent(connName)}">map your accounts &rarr;</a></p>
+      <p><a href="/">&larr; Back to home</a></p>
+    </body></html>`);
   } catch (err) {
-    console.error('Exchange error:', err);
-    res.json({ ok: false, error: err.message });
+    console.error('Callback error:', err);
+    res.status(500).send(`<h1>Error</h1><p>${err.message}</p><a href="/">&larr; Back</a>`);
   }
 });
 
@@ -240,12 +215,12 @@ app.get('/accounts/:name', async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
   const conn = config.connections.find(c => c.name === name);
-  if (!conn) return res.status(404).send('Connection not found');
+  if (!conn) return res.status(404).send('Connection not found. <a href="/">Back</a>');
 
   try {
     const state = loadState();
     const connState = state.connections[name];
-    if (!connState) throw new Error('No token found for this connection');
+    if (!connState) throw new Error('No token for this connection — re-authorise from home page');
 
     const tokenRes = await fetch('https://auth.truelayer.com/connect/token', {
       method: 'POST',
@@ -269,7 +244,6 @@ app.get('/accounts/:name', async (req, res) => {
 
     const allIds = accounts.map(a => a.account_id).join(',');
     const allNames = accounts.map(a => encodeURIComponent(a.display_name || a.account_type)).join(',');
-
     const rows = accounts.map(acc => {
       const existing = conn.accounts.find(a => a.trueLayerId === acc.account_id);
       return `<tr>
@@ -314,7 +288,7 @@ app.get('/accounts/:name', async (req, res) => {
 </body>
 </html>`);
   } catch (err) {
-    res.status(500).send('Error fetching accounts: ' + err.message + '<br><a href="/">&larr; Back</a>');
+    res.status(500).send('Error: ' + err.message + '<br><a href="/">&larr; Back</a>');
   }
 });
 
@@ -346,5 +320,5 @@ app.post('/save-mapping/:name', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Setup UI running on http://0.0.0.0:${PORT}`);
-  console.log(`Using TrueLayer redirect URI: ${TRUELAYER_REDIRECT_URI}`);
+  console.log(`Redirect URI: ${REDIRECT_URI}`);
 });
