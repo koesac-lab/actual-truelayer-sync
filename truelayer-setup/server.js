@@ -22,7 +22,6 @@ const RAW_CLIENT_ID = process.env.TRUELAYER_CLIENT_ID || '';
 const CLIENT_SECRET  = process.env.TRUELAYER_CLIENT_SECRET || '';
 const SANDBOX = (process.env.TRUELAYER_ENV || '').toLowerCase() === 'sandbox';
 
-// In sandbox mode, TrueLayer expects the client_id prefixed with "sandbox-"
 const CLIENT_ID = SANDBOX && RAW_CLIENT_ID && !RAW_CLIENT_ID.startsWith('sandbox-')
   ? `sandbox-${RAW_CLIENT_ID}`
   : RAW_CLIENT_ID;
@@ -207,7 +206,6 @@ app.get('/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenData.refresh_token) throw new Error('No refresh token: ' + JSON.stringify(tokenData));
 
-    // Fetch bank name
     const endpoint = isCard ? 'cards' : 'accounts';
     const accountsRes = await fetch(`${API_URL}/data/v1/${endpoint}`, {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
@@ -286,12 +284,15 @@ app.get('/accounts/:name', async (req, res) => {
 
     const allIds   = accounts.map(a => a.account_id).join(',');
     const allNames = accounts.map(a => encodeURIComponent(a.display_name || a.account_type)).join(',');
+
     const rows = accounts.map(acc => {
       const existing = conn.accounts.find(a => a.trueLayerId === acc.account_id);
       return `<tr>
           <td>${acc.display_name || acc.account_type}</td>
-          <td><code>${acc.account_id}</code></td>
-          <td><input name="mapping_${acc.account_id}" value="${existing ? existing.actualId : ''}" placeholder="e.g. abc123..."></td>
+          <td><code style="font-size:0.8em">${acc.account_id}</code></td>
+          <td><input name="actualId_${acc.account_id}" value="${existing ? existing.actualId : ''}" placeholder="Paste Actual account ID"></td>
+          <td><input name="friendlyName_${acc.account_id}" value="${existing ? existing.friendlyName : (acc.display_name || acc.account_type)}" placeholder="e.g. Main Current Account"></td>
+          <td style="text-align:center"><input type="checkbox" name="flip_${acc.account_id}" ${existing && existing.flip ? 'checked' : ''}></td>
         </tr>`;
     }).join('');
 
@@ -300,26 +301,35 @@ app.get('/accounts/:name', async (req, res) => {
 <head>
   <title>Map Accounts - ${name}</title>
   <style>
-    body { font-family: system-ui; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    body { font-family: system-ui; max-width: 1000px; margin: 40px auto; padding: 0 20px; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
-    th { background: #f0f0f0; }
-    input { width: 100%; padding: 6px; box-sizing: border-box; }
+    th, td { padding: 10px; border: 1px solid #ddd; text-align: left; vertical-align: middle; }
+    th { background: #f0f0f0; font-size: 0.85em; }
+    input[type=text], input:not([type]) { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 3px; }
     button { padding: 10px 20px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 16px; }
     a { color: #0066cc; }
-    code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+    code { background: #f4f4f4; padding: 2px 4px; border-radius: 3px; }
+    .hint { font-size: 0.85em; color: #666; margin-bottom: 12px; }
   </style>
 </head>
 <body>
-  <h1>&#128194; Map Accounts - ${name}</h1>
-  <p>Paste the <strong>Actual Budget account ID</strong> (from Settings &rarr; Accounts in Actual) next to each account. Leave blank to skip.</p>
+  <h1>&#128194; Map Accounts &mdash; ${name}</h1>
+  <p class="hint">
+    Find your <strong>Actual Budget account ID</strong> in Actual: Settings &rarr; click an account &rarr; the ID is in the URL or shown under Advanced.<br>
+    <strong>Friendly Name</strong> is used in sync logs. <strong>Flip</strong> inverts transaction amounts (useful for credit cards shown as positive).
+  </p>
   <form action="/save-mapping/${encodeURIComponent(name)}" method="POST">
     <table>
-      <tr><th>Bank Account Name</th><th>TrueLayer ID</th><th>Actual Budget Account ID</th></tr>
+      <tr>
+        <th>Bank Account</th>
+        <th>TrueLayer ID</th>
+        <th>Actual Budget Account ID</th>
+        <th>Friendly Name</th>
+        <th>Flip</th>
+      </tr>
       ${rows}
     </table>
     <input type="hidden" name="allIds" value="${allIds}">
-    <input type="hidden" name="allNames" value="${allNames}">
     <button type="submit">&#128190; Save Mappings</button>
   </form>
   <br><a href="/">&larr; Back</a>
@@ -336,21 +346,26 @@ app.post('/save-mapping/:name', (req, res) => {
   const conn = config.connections.find(c => c.name === name);
   if (!conn) return res.status(404).send('Connection not found');
 
-  const ids   = req.body.allIds.split(',');
-  const names = req.body.allNames.split(',').map(n => decodeURIComponent(n));
+  const ids = req.body.allIds.split(',').filter(Boolean);
 
+  // Only save accounts that have an actualId
   conn.accounts = ids
-    .map((id, i) => ({ trueLayerId: id, name: names[i], actualId: req.body[`mapping_${id}`] }))
-    .filter(a => a.actualId && a.actualId.trim());
+    .map(id => {
+      const actualId     = (req.body[`actualId_${id}`] || '').trim();
+      const friendlyName = (req.body[`friendlyName_${id}`] || '').trim();
+      const flip         = req.body[`flip_${id}`] === 'on';
+      return { trueLayerId: id, actualId, friendlyName, ...(flip ? { flip: true } : {}) };
+    })
+    .filter(a => a.actualId && a.friendlyName);
 
   saveConfig(config);
   res.send(`<!DOCTYPE html><html><body style="font-family:system-ui;max-width:600px;margin:40px auto;padding:0 20px">
     <h1>&#9989; Mappings saved!</h1>
     <p>Saved ${conn.accounts.length} account mapping(s) for <strong>${name}</strong>.</p>
-    <p><a href="/">&larr; Back to home</a></p>
+    <p><a href="/accounts/${encodeURIComponent(name)}">&#8592; Back to account list</a> &nbsp;|&nbsp; <a href="/">Home</a></p>
     <hr>
     <p>Start your scheduled sync:</p>
-    <pre style="background:#f4f4f4;padding:12px;border-radius:4px">docker compose up -d actual-truelayer-sync</pre>
+    <pre style="background:#f4f4f4;padding:12px;border-radius:4px">docker compose up -d truelayer-sync</pre>
     <p>Then tear down this setup UI:</p>
     <pre style="background:#f4f4f4;padding:12px;border-radius:4px">docker compose --profile setup down truelayer-setup</pre>
   </body></html>`);
