@@ -7,20 +7,34 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3099;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return { version: 2, connections: [] };
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, 'utf8').trim();
+    if (!raw) return { version: 2, connections: [] };
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn('config.json unreadable, using defaults:', e.message);
+    return { version: 2, connections: [] };
+  }
 }
 function saveConfig(cfg) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
 }
 function loadState() {
   if (!fs.existsSync(STATE_PATH)) return { connections: {} };
-  return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+  try {
+    const raw = fs.readFileSync(STATE_PATH, 'utf8').trim();
+    if (!raw) return { connections: {} };
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn('state.json unreadable, using defaults:', e.message);
+    return { connections: {} };
+  }
 }
 function saveState(st) {
   fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2));
