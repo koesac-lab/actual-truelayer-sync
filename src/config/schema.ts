@@ -1,13 +1,33 @@
 import { z } from 'zod'
 import cron from 'node-cron'
 
-export const AccountSchema = z.object({
-  trueLayerId: z.string().min(1),
-  actualId: z.string().min(1),
-  friendlyName: z.string().min(1),
-  isCard: z.boolean().optional(),
-  flip: z.boolean().optional(),
-})
+export const AccountSchema = z
+  .object({
+    trueLayerId: z.string().min(1),
+    actualId: z.string().min(1),
+    // `name` is the legacy field written by older versions of the setup UI.
+    // Accept either; `friendlyName` takes precedence. Both are optional at the
+    // raw-input level so we can validate the merged result in `.transform()`.
+    friendlyName: z.string().min(1).optional(),
+    name: z.string().min(1).optional(),
+    isCard: z.boolean().optional(),
+    flip: z.boolean().optional(),
+  })
+  .transform((val) => {
+    const resolved = val.friendlyName ?? val.name
+    if (!resolved) {
+      // This path is hit only when neither field is present; Zod will surface
+      // the error via the refine below.
+      return { ...val, friendlyName: '' }
+    }
+    // Normalise: always expose `friendlyName`, drop the legacy `name` key.
+    const { name: _dropped, ...rest } = val
+    return { ...rest, friendlyName: resolved }
+  })
+  .refine((val) => val.friendlyName.length > 0, {
+    message: 'friendlyName (or legacy name) must be a non-empty string',
+    path: ['friendlyName'],
+  })
 
 export const ConnectionSchema = z.object({
   name: z.string().min(1),
