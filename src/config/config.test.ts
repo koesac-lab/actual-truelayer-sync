@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { AccountSchema, ConnectionSchema, EnvSchema, FileConfigSchema, StateSchema } from './schema'
+import { AccountSchema, ConnectionSchema, EnvSchema, FileConfigSchema, StateSchema, ValidatedEnvSchema } from './schema'
 
 describe('AccountSchema', () => {
   const validAccount = {
@@ -195,11 +195,11 @@ describe('EnvSchema', () => {
   })
 
   it('rejects an invalid ACTUAL_SERVER_URL', () => {
-    expect(EnvSchema.safeParse({ ...validEnv, ACTUAL_SERVER_URL: 'not-a-url' }).success).toBe(false)
+    expect(ValidatedEnvSchema.safeParse({ ...validEnv, ACTUAL_SERVER_URL: 'not-a-url' }).success).toBe(false)
   })
 
   it('rejects an invalid ACTUAL_SYNC_ID', () => {
-    expect(EnvSchema.safeParse({ ...validEnv, ACTUAL_SYNC_ID: 'not-a-uuid' }).success).toBe(false)
+    expect(ValidatedEnvSchema.safeParse({ ...validEnv, ACTUAL_SYNC_ID: 'not-a-uuid' }).success).toBe(false)
   })
 
   it('rejects an invalid CRON_SCHEDULE', () => {
@@ -208,16 +208,16 @@ describe('EnvSchema', () => {
 
   it('rejects missing TRUELAYER_CLIENT_ID', () => {
     const { TRUELAYER_CLIENT_ID: _, ...rest } = validEnv
-    expect(EnvSchema.safeParse(rest).success).toBe(false)
+    expect(ValidatedEnvSchema.safeParse(rest).success).toBe(false)
   })
 
   it('rejects missing TRUELAYER_CLIENT_SECRET', () => {
     const { TRUELAYER_CLIENT_SECRET: _, ...rest } = validEnv
-    expect(EnvSchema.safeParse(rest).success).toBe(false)
+    expect(ValidatedEnvSchema.safeParse(rest).success).toBe(false)
   })
 
   it('rejects missing ACTUAL_SERVER_PASSWORD', () => {
     const { ACTUAL_SERVER_PASSWORD: _, ...rest } = validEnv
-    expect(EnvSchema.safeParse(rest).success).toBe(false)
+    expect(ValidatedEnvSchema.safeParse(rest).success).toBe(false)
   })
 })
