@@ -21,10 +21,6 @@ jobs:
             --exclude 'node_modules/' \
             "$GITHUB_WORKSPACE"/ "$DEPLOY_DIR"/
 
-      - name: Pull latest images
-        working-directory: /home/koesac/apps/actual-truelayer-sync
-        run: docker compose pull actual-truelayer-sync actual-truelayer-setup
-
       - name: Restart containers
         working-directory: /home/koesac/apps/actual-truelayer-sync
         run: docker compose up -d actual-truelayer-sync
