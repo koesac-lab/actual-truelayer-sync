@@ -24,7 +24,6 @@ const ACTUAL_URL     = process.env.ACTUAL_SERVER_URL || '';
 const ACTUAL_PASS    = process.env.ACTUAL_SERVER_PASSWORD || '';
 const SANDBOX = (process.env.TRUELAYER_ENV || '').toLowerCase() === 'sandbox';
 
-// In sandbox mode TrueLayer requires the client_id prefixed with "sandbox-"
 const CLIENT_ID = SANDBOX && RAW_CLIENT_ID && !RAW_CLIENT_ID.startsWith('sandbox-')
   ? `sandbox-${RAW_CLIENT_ID}`
   : RAW_CLIENT_ID;
@@ -75,10 +74,6 @@ function saveState(st) {
   fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2));
 }
 
-/**
- * Return the most recent lastSyncDate across all accounts in a connection's
- * state entry, or null if never synced.
- */
 function lastSyncedFor(connState) {
   if (!connState || !connState.accounts) return null;
   const dates = Object.values(connState.accounts)
@@ -88,7 +83,6 @@ function lastSyncedFor(connState) {
   return dates.length ? dates[dates.length - 1] : null;
 }
 
-/** Format an ISO date string as a relative label, e.g. "2 hours ago" */
 function relativeTime(isoDate) {
   if (!isoDate) return null;
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -103,10 +97,6 @@ function relativeTime(isoDate) {
   return new Date(isoDate).toLocaleDateString();
 }
 
-/**
- * Given a base name (e.g. "Monzo"), return a name that does not already exist
- * in config.connections.
- */
 function uniqueConnName(base, existingConnections) {
   const existing = new Set(existingConnections.map(c => c.name));
   if (!existing.has(base)) return base;
@@ -115,11 +105,6 @@ function uniqueConnName(base, existingConnections) {
   return `${base}-${i}`;
 }
 
-/**
- * Build account mapping table rows.
- * savedAccounts — conn.accounts from config.json (always available)
- * liveAccounts  — results from TrueLayer API (null if not fetched yet)
- */
 function buildRows(savedAccounts, liveAccounts) {
   if (liveAccounts) {
     const rows = liveAccounts.map(acc => {
@@ -159,10 +144,42 @@ function buildRows(savedAccounts, liveAccounts) {
   }));
 }
 
-// Shared CSS / HTML shell used by every page
+/** Exchange a refresh token for an access token, persisting any rotated token. */
+async function getAccessToken(connName, connState) {
+  const tokenRes = await fetch(`${AUTH_URL}/connect/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      refresh_token: connState.refreshToken,
+    }),
+  });
+  const tokenData = await tokenRes.json();
+  if (!tokenData.access_token) throw new Error('Token refresh failed: ' + JSON.stringify(tokenData));
+  if (tokenData.refresh_token) {
+    connState.refreshToken = tokenData.refresh_token;
+    const state = loadState();
+    if (state.connections[connName]) {
+      state.connections[connName].refreshToken = tokenData.refresh_token;
+      saveState(state);
+    }
+  }
+  return tokenData.access_token;
+}
+
+/** Format pence/minor units as a currency string, e.g. 123456 -> £1,234.56 */
+function formatAmount(amount, currency) {
+  if (amount == null) return '—';
+  const sym = { GBP: '£', EUR: '€', USD: '$' }[currency] || (currency ? currency + ' ' : '');
+  return sym + Math.abs(amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ── Shared CSS ────────────────────────────────────────────────────────────────
 const SHARED_CSS = `
   *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 24px 20px 60px; background: #f5f5f5; color: #1a1a1a; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px 20px 60px; background: #f5f5f5; color: #1a1a1a; }
   h1 { margin: 0 0 4px; font-size: 1.4em; }
   h2 { font-size: 1.1em; margin: 0 0 12px; }
   a { color: #0066cc; }
@@ -186,6 +203,8 @@ const SHARED_CSS = `
   .btn-danger:hover { background: #9b1c1c; }
   .btn-ghost { background: #eee; color: #333; }
   .btn-ghost:hover { background: #ddd; }
+  .btn-green { background: #137333; color: #fff; }
+  .btn-green:hover { background: #0a5227; }
   .mode-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-weight: 700;
     font-size: 0.8em; margin-left: 8px; vertical-align: middle; }
   .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:100; align-items:center; justify-content:center; }
@@ -202,6 +221,28 @@ const SHARED_CSS = `
   .security-banner strong { color:#e65100; }
   .last-synced { font-size:0.8em; color:#666; margin-top:4px; }
   .last-synced.overdue { color:#c5221f; font-weight:600; }
+  /* Balance / transaction styles */
+  .balance-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; margin-bottom:28px; }
+  .balance-card { background:#fff; border:1px solid #ddd; border-radius:8px; padding:14px 18px; }
+  .balance-card .acc-name { font-weight:600; font-size:0.95em; margin-bottom:2px; }
+  .balance-card .acc-id   { font-size:0.75em; color:#888; margin-bottom:10px; font-family:monospace; }
+  .balance-card .bal-row  { display:flex; justify-content:space-between; align-items:baseline; font-size:0.88em; margin-top:4px; }
+  .balance-card .bal-label { color:#666; }
+  .balance-card .bal-amount { font-weight:700; font-size:1.05em; }
+  .balance-card .bal-amount.positive { color:#137333; }
+  .balance-card .bal-amount.negative { color:#c5221f; }
+  .txn-table { width:100%; border-collapse:collapse; font-size:0.85em; }
+  .txn-table th { background:#f0f0f0; padding:8px 10px; border:1px solid #ddd; text-align:left; white-space:nowrap; }
+  .txn-table td { padding:7px 10px; border:1px solid #eee; vertical-align:top; }
+  .txn-table tr:hover td { background:#fafafa; }
+  .txn-table .amt-credit { color:#137333; font-weight:600; text-align:right; white-space:nowrap; }
+  .txn-table .amt-debit  { color:#c5221f; font-weight:600; text-align:right; white-space:nowrap; }
+  .txn-table .amt-zero   { color:#888; text-align:right; white-space:nowrap; }
+  .txn-section { margin-bottom:32px; }
+  .txn-section h3 { font-size:1em; margin:0 0 8px; }
+  .spinner { display:inline-block; width:18px; height:18px; border:3px solid #ccc;
+             border-top-color:#0066cc; border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
 `;
 
 function page(title, body) {
@@ -293,18 +334,17 @@ function renderMappingPage(name, conn, rows, notice) {
 app.get('/', (req, res) => {
   const config = loadConfig();
   const state  = loadState();
-  const missingCreds   = !RAW_CLIENT_ID || !CLIENT_SECRET;
+  const missingCreds    = !RAW_CLIENT_ID || !CLIENT_SECRET;
   const sandboxPrefixed = SANDBOX && RAW_CLIENT_ID && !RAW_CLIENT_ID.startsWith('sandbox-');
 
   const connCards = config.connections.length === 0
     ? '<p style="color:#888;font-size:0.9em">No connections yet.</p>'
     : config.connections.map(c => {
-        const connState   = state.connections[c.name];
-        const hasToken    = !!connState;
-        const lastSynced  = lastSyncedFor(connState);
-        const rel         = relativeTime(lastSynced);
-        // Flag as overdue if last sync was >6 hours ago (generous vs 4h schedule)
-        const overdue     = lastSynced && (Date.now() - new Date(lastSynced).getTime()) > 6 * 60 * 60 * 1000;
+        const connState  = state.connections[c.name];
+        const hasToken   = !!connState;
+        const lastSynced = lastSyncedFor(connState);
+        const rel        = relativeTime(lastSynced);
+        const overdue    = lastSynced && (Date.now() - new Date(lastSynced).getTime()) > 6 * 60 * 60 * 1000;
         return `<div class="card">
           <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px">
             <div>
@@ -321,9 +361,10 @@ app.get('/', (req, res) => {
           </div>
           <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
             <a class="btn btn-secondary" href="/accounts/${encodeURIComponent(c.name)}">View / Map Accounts</a>
-            ${!hasToken
-              ? `<a class="btn btn-primary" href="/reauth/${encodeURIComponent(c.name)}">🔒 Re-authorise</a>`
-              : ''}
+            ${hasToken
+              ? `<a class="btn btn-green" href="/balances/${encodeURIComponent(c.name)}">💰 Balances &amp; Transactions</a>`
+              : `<a class="btn btn-primary" href="/reauth/${encodeURIComponent(c.name)}">🔒 Re-authorise</a>`
+            }
             <button class="btn btn-danger" onclick="confirmDelete('${c.name.replace(/'/g, "\\'")}')">Remove</button>
           </div>
         </div>`;
@@ -391,6 +432,237 @@ app.get('/', (req, res) => {
   </script>`));
 });
 
+// ── Balances & Transactions ───────────────────────────────────────────────────
+app.get('/balances/:name', async (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  const config = loadConfig();
+  const conn   = config.connections.find(c => c.name === name);
+  if (!conn) return res.status(404).send('Connection not found. <a href="/">Back</a>');
+
+  const state     = loadState();
+  const connState = state.connections[name];
+  if (!connState) {
+    return res.send(page(`Balances — ${name}`, `
+      <p><a href="/">← Home</a></p>
+      <div class="notice error">⚠️ No token for <strong>${name}</strong> — <a href="/reauth/${encodeURIComponent(name)}">re-authorise first</a>.</div>`));
+  }
+
+  // Show the page shell immediately; data loads via AJAX so the user sees
+  // a spinner rather than a blank page while TrueLayer responds.
+  res.send(page(`Balances & Transactions — ${name}`, `
+  <p style="margin:0 0 16px"><a href="/">← Home</a></p>
+  <h1>💰 Balances &amp; Transactions — ${name}</h1>
+  <p style="font-size:0.85em;color:#666;margin-bottom:18px">Live data fetched directly from TrueLayer. Showing last 50 transactions per account.</p>
+
+  <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn btn-green" id="refreshBtn" onclick="loadData()">⟳ Refresh data</button>
+    <span id="fetchStatus" style="font-size:0.85em;color:#666"></span>
+  </div>
+
+  <div id="content">
+    <div style="padding:40px;text-align:center;color:#666">
+      <span class="spinner"></span> Fetching balances and transactions from TrueLayer…
+    </div>
+  </div>
+
+  <script>
+    async function loadData() {
+      const btn = document.getElementById('refreshBtn');
+      const status = document.getElementById('fetchStatus');
+      btn.disabled = true;
+      btn.textContent = '⟳ Refreshing…';
+      status.textContent = '';
+      document.getElementById('content').innerHTML =
+        '<div style="padding:40px;text-align:center;color:#666"><span class="spinner"></span> Fetching…</div>';
+
+      try {
+        const res = await fetch('/api/balances/${encodeURIComponent(name)}');
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        renderData(data);
+        status.textContent = 'Updated ' + new Date().toLocaleTimeString();
+      } catch (e) {
+        document.getElementById('content').innerHTML =
+          '<div class="notice error">⚠️ ' + e.message + '</div>';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '⟳ Refresh data';
+      }
+    }
+
+    function fmt(amount, currency) {
+      if (amount == null) return '—';
+      const syms = { GBP: '£', EUR: '€', USD: '$' };
+      const sym  = syms[currency] || (currency + ' ');
+      return sym + Math.abs(amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function amtClass(amount) {
+      if (!amount) return 'amt-zero';
+      return amount > 0 ? 'amt-credit' : 'amt-debit';
+    }
+
+    function renderData(data) {
+      let html = '<div class="balance-grid">';
+
+      for (const acc of data.accounts) {
+        const b = acc.balance;
+        const current  = b ? fmt(b.current,   b.currency) : '—';
+        const available = b && b.available != null ? fmt(b.available, b.currency) : null;
+        const currentCls = b && b.current != null ? (b.current >= 0 ? 'positive' : 'negative') : '';
+
+        html += `
+          <div class="balance-card">
+            <div class="acc-name">${acc.friendlyName || acc.displayName}</div>
+            <div class="acc-id">${acc.trueLayerId}</div>
+            <div class="bal-row">
+              <span class="bal-label">Current balance</span>
+              <span class="bal-amount ${currentCls}">${current}</span>
+            </div>
+            ${available != null ? `
+            <div class="bal-row">
+              <span class="bal-label">Available</span>
+              <span class="bal-amount">${available}</span>
+            </div>` : ''}
+            ${acc.balanceError ? `<div style="font-size:0.78em;color:#c5221f;margin-top:6px">⚠️ ${acc.balanceError}</div>` : ''}
+          </div>`;
+      }
+
+      html += '</div>';
+
+      for (const acc of data.accounts) {
+        const txns = acc.transactions || [];
+        html += `<div class="txn-section">
+          <h3>📋 ${acc.friendlyName || acc.displayName} — recent transactions (${txns.length})</h3>`;
+
+        if (acc.txnError) {
+          html += `<div class="notice error" style="font-size:0.88em">⚠️ ${acc.txnError}</div>`;
+        } else if (txns.length === 0) {
+          html += '<p style="color:#888;font-size:0.88em">No transactions found.</p>';
+        } else {
+          html += `<div style="overflow-x:auto"><table class="txn-table">
+            <thead><tr>
+              <th>Date</th>
+              <th>Description</th>
+              <th>Category</th>
+              <th>Amount</th>
+              <th>Running balance</th>
+            </tr></thead><tbody>`;
+
+          for (const t of txns) {
+            const date  = t.timestamp ? t.timestamp.slice(0, 10) : '—';
+            const desc  = t.description || t.merchant_name || '—';
+            const cat   = t.transaction_category || '—';
+            const cls   = amtClass(t.amount);
+            const sign  = t.amount > 0 ? '+' : '';
+            const amt   = t.amount != null ? sign + fmt(t.amount, t.currency) : '—';
+            const runBal = t.running_balance != null ? fmt(t.running_balance.amount, t.running_balance.currency) : '—';
+            html += `<tr>
+              <td style="white-space:nowrap">${date}</td>
+              <td>${desc}</td>
+              <td style="color:#666;font-size:0.9em">${cat}</td>
+              <td class="${cls}">${amt}</td>
+              <td style="color:#666;text-align:right;white-space:nowrap">${runBal}</td>
+            </tr>`;
+          }
+
+          html += '</tbody></table></div>';
+        }
+        html += '</div>';
+      }
+
+      document.getElementById('content').innerHTML = html;
+    }
+
+    // Auto-load on page open
+    loadData();
+  </script>`));
+});
+
+// ── API: fetch balances + transactions (called by the page above via AJAX) ────
+app.get('/api/balances/:name', async (req, res) => {
+  const name = decodeURIComponent(req.params.name);
+  const config = loadConfig();
+  const conn   = config.connections.find(c => c.name === name);
+  if (!conn) return res.status(404).json({ error: 'Connection not found' });
+
+  const state     = loadState();
+  const connState = state.connections[name];
+  if (!connState) return res.status(401).json({ error: 'No token — re-authorise first' });
+
+  let accessToken;
+  try {
+    accessToken = await getAccessToken(name, connState);
+  } catch (e) {
+    return res.status(401).json({ error: 'Token refresh failed: ' + e.message });
+  }
+
+  const endpoint = conn.isCard ? 'cards' : 'accounts';
+
+  // Fetch live account list so we get display names
+  let liveAccounts = [];
+  try {
+    const r = await fetch(`${API_URL}/data/v1/${endpoint}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const d = await r.json();
+    liveAccounts = d.results || [];
+  } catch (_) {}
+
+  const results = [];
+
+  for (const saved of conn.accounts) {
+    const live = liveAccounts.find(a => a.account_id === saved.trueLayerId);
+    const entry = {
+      trueLayerId:  saved.trueLayerId,
+      friendlyName: saved.friendlyName,
+      displayName:  live ? (live.display_name || live.account_type || saved.trueLayerId) : saved.trueLayerId,
+      balance:      null,
+      balanceError: null,
+      transactions: [],
+      txnError:     null,
+    };
+
+    // Balance
+    try {
+      const balRes  = await fetch(`${API_URL}/data/v1/${endpoint}/${saved.trueLayerId}/balance`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const balData = await balRes.json();
+      entry.balance = (balData.results || [])[0] || null;
+      if (!entry.balance && balData.error) entry.balanceError = balData.error;
+    } catch (e) {
+      entry.balanceError = e.message;
+    }
+
+    // Transactions — last 50
+    try {
+      const txnEndpoint = conn.isCard
+        ? `${API_URL}/data/v1/cards/${saved.trueLayerId}/transactions`
+        : `${API_URL}/data/v1/accounts/${saved.trueLayerId}/transactions`;
+
+      // Use a 90-day window to get plenty of recent history
+      const from = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const to   = new Date().toISOString().slice(0, 10);
+      const txnRes  = await fetch(`${txnEndpoint}?from=${from}&to=${to}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const txnData = await txnRes.json();
+      const all = txnData.results || [];
+      // Sort newest first, cap at 50
+      all.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      entry.transactions = all.slice(0, 50);
+      if (entry.transactions.length === 0 && txnData.error) entry.txnError = txnData.error;
+    } catch (e) {
+      entry.txnError = e.message;
+    }
+
+    results.push(entry);
+  }
+
+  res.json({ accounts: results });
+});
+
 // ── Status JSON ───────────────────────────────────────────────────────────────
 app.get('/status', (req, res) => {
   const config = loadConfig();
@@ -418,7 +690,6 @@ app.get('/actual-accounts', async (req, res) => {
   }
 
   try {
-    // Authenticate
     const authRes  = await fetch(`${ACTUAL_URL}/account/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -428,7 +699,6 @@ app.get('/actual-accounts', async (req, res) => {
     const token    = authData.data?.token;
     if (!token) throw new Error('Login failed: ' + JSON.stringify(authData));
 
-    // List budgets
     const budgetsRes  = await fetch(`${ACTUAL_URL}/sync/list`, {
       headers: { 'x-actual-token': token },
     });
@@ -440,7 +710,6 @@ app.get('/actual-accounts', async (req, res) => {
         '<p><a href="/">← Home</a></p><div class="notice info">No budgets found in your Actual instance.</div>'));
     }
 
-    // For each budget, download and list accounts
     const sections = [];
     for (const budget of budgets) {
       try {
@@ -479,7 +748,7 @@ app.get('/actual-accounts', async (req, res) => {
       `<p><a href="/">← Home</a></p>
        <h1>🔍 Actual Budget Accounts</h1>
        <p style="font-size:0.9em;color:#555;margin-bottom:20px">Click an Account ID to select it, then copy and paste it into the mapping form.</p>
-       ${sections.join('')}` ));
+       ${sections.join('')}`));
   } catch (err) {
     console.error('Actual accounts error:', err);
     res.send(page('Actual Accounts',
@@ -489,7 +758,7 @@ app.get('/actual-accounts', async (req, res) => {
   }
 });
 
-// ── Start OAuth (new connection) ──────────────────────────────────────────────
+// ── Start OAuth ───────────────────────────────────────────────────────────────
 app.post('/start-auth', (req, res) => {
   const { isCard } = req.body;
   if (!CLIENT_ID) return res.status(500).send('TRUELAYER_CLIENT_ID not set. <a href="/">Back</a>');
@@ -511,7 +780,7 @@ app.post('/start-auth', (req, res) => {
   res.redirect(url);
 });
 
-// ── Re-authorise existing connection ─────────────────────────────────────────
+// ── Re-authorise ──────────────────────────────────────────────────────────────
 app.get('/reauth/:name', (req, res) => {
   const name = decodeURIComponent(req.params.name);
   if (!CLIENT_ID) return res.status(500).send('TRUELAYER_CLIENT_ID not set. <a href="/">Back</a>');
@@ -565,7 +834,6 @@ app.get('/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenData.refresh_token) throw new Error('No refresh token: ' + JSON.stringify(tokenData));
 
-    // Re-auth: just refresh the token for an existing connection
     if (reauthName) {
       const state = loadState();
       const existing = state.connections[reauthName] || { accounts: {} };
@@ -577,7 +845,6 @@ app.get('/callback', async (req, res) => {
         <p><a href="/">← Back to home</a></p>`));
     }
 
-    // New connection: discover bank name from accounts API
     const endpoint    = isCard ? 'cards' : 'accounts';
     const accountsRes = await fetch(`${API_URL}/data/v1/${endpoint}`, {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
@@ -612,7 +879,7 @@ app.get('/callback', async (req, res) => {
   }
 });
 
-// ── Delete connection ─────────────────────────────────────────────────────────
+// ── Delete ────────────────────────────────────────────────────────────────────
 app.get('/delete/:name', (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
@@ -624,7 +891,7 @@ app.get('/delete/:name', (req, res) => {
   res.redirect('/');
 });
 
-// ── Account Mapping — show saved data immediately (no API call) ───────────────
+// ── Account Mapping ───────────────────────────────────────────────────────────
 app.get('/accounts/:name', (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
@@ -639,7 +906,6 @@ app.get('/accounts/:name', (req, res) => {
   res.send(renderMappingPage(name, conn, rows, notice));
 });
 
-// ── Account Mapping — refresh from TrueLayer API ──────────────────────────────
 app.get('/accounts/:name/refresh', async (req, res) => {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
@@ -656,28 +922,10 @@ app.get('/accounts/:name/refresh', async (req, res) => {
   }
 
   try {
-    const tokenRes = await fetch(`${AUTH_URL}/connect/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        refresh_token: connState.refreshToken,
-      }),
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) throw new Error('Token refresh failed: ' + JSON.stringify(tokenData));
-
-    // Persist the rotated refresh token — TrueLayer tokens are single-use
-    if (tokenData.refresh_token) {
-      connState.refreshToken = tokenData.refresh_token;
-      saveState(state);
-    }
-
+    const accessToken = await getAccessToken(name, connState);
     const endpoint = conn.isCard ? 'cards' : 'accounts';
     const apiRes   = await fetch(`${API_URL}/data/v1/${endpoint}`, {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
     const apiData      = await apiRes.json();
     const liveAccounts = apiData.results || [];
