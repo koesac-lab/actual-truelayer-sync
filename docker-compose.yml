@@ -1,42 +1,13 @@
 services:
-  actual-server:
-    image: actualbudget/actual-server:latest
-    container_name: actual-server
-    ports:
-      - "5006:5006"
-    volumes:
-      - ./actual-data:/data
-    environment:
-      - NODE_ENV=production
-    restart: unless-stopped
-    networks:
-      - finance
-
-  actual-truelayer-sync:
-    image: ghcr.io/sheppy/actual-truelayer-sync:latest
-    container_name: actual-truelayer-sync
-    environment:
-      - ACTUAL_SERVER_URL=http://actual-server:5006
-      - CRON_SCHEDULE=0 */4 * * *
-      - TZ=Europe/London
-    volumes:
-      - ./truelayer-data:/app/data
-    restart: unless-stopped
-    networks:
-      - finance
-    depends_on:
-      - actual-server
-
   actual-truelayer-setup:
-    image: actual-budget-truelayer-setup:latest
+    build: ./truelayer-setup
+    image: actual-truelayer-setup:latest
     container_name: actual-truelayer-setup
     ports:
       - "3099:3099"
-    environment:
-      - REDIRECT_URI=https://truelayer.alexkoester.com/callback
+    env_file: .env
     volumes:
       - ./truelayer-data:/app/data
-      - /home/koesac/apps/actual-truelayer-sync/truelayer-setup/server.js:/app/server.js:ro
     networks:
       - finance
     profiles:

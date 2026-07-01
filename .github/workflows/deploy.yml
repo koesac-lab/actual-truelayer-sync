@@ -12,18 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Sync repo to stable deploy path
+      - name: Sync repo to deploy path
         run: |
           DEPLOY_DIR=/home/koesac/apps/actual-truelayer-sync
           mkdir -p "$DEPLOY_DIR"
           rsync -a --delete \
             --exclude '.git/' \
-            --exclude 'node_modules/' \
             "$GITHUB_WORKSPACE"/ "$DEPLOY_DIR"/
 
-      - name: Restart containers
+      - name: Build setup image
         working-directory: /home/koesac/apps/actual-truelayer-sync
-        run: docker compose up -d actual-truelayer-sync
+        run: docker compose build actual-truelayer-setup
 
       - name: Clean up old images
         run: docker image prune -f

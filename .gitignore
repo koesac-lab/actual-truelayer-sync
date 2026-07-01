@@ -1,10 +1,3 @@
-.idea/
-node_modules/
-dist/
-data/
 .env
-.env
-actual-data/
 truelayer-data/
-db-data/
-*.log
+node_modules/
