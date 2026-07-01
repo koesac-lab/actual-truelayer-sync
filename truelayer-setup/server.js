@@ -10,11 +10,11 @@ const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const PORT = process.env.PORT || 3099;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const STATE_PATH  = path.join(DATA_DIR, 'state.json');
+const TXN_DIR     = path.join(DATA_DIR, 'transactions');
 
 const REDIRECT_URI = process.env.REDIRECT_URI;
 if (!REDIRECT_URI) {
   console.error('ERROR: REDIRECT_URI env var is not set.');
-  console.error('e.g. REDIRECT_URI=http://192.168.1.10:3099/callback');
   process.exit(1);
 }
 
@@ -52,13 +52,12 @@ function loadConfig() {
     if (!raw) return { version: 2, connections: [] };
     return JSON.parse(raw);
   } catch (e) {
-    console.warn('config.json unreadable, using defaults:', e.message);
+    console.warn('config.json unreadable:', e.message);
     return { version: 2, connections: [] };
   }
 }
-function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
-}
+function saveConfig(cfg) { fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2)); }
+
 function loadState() {
   if (!fs.existsSync(STATE_PATH)) return { connections: {} };
   try {
@@ -66,20 +65,55 @@ function loadState() {
     if (!raw) return { connections: {} };
     return JSON.parse(raw);
   } catch (e) {
-    console.warn('state.json unreadable, using defaults:', e.message);
+    console.warn('state.json unreadable:', e.message);
     return { connections: {} };
   }
 }
-function saveState(st) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2));
+function saveState(st) { fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2)); }
+
+// ── Transaction store ─────────────────────────────────────────────────────────
+
+function txnPath(connName, accountId) {
+  const dir = path.join(TXN_DIR, connName.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, accountId.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json');
 }
+
+function loadStoredTxns(connName, accountId) {
+  const p = txnPath(connName, accountId);
+  if (!fs.existsSync(p)) return [];
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+  catch (e) { console.warn('txn file unreadable:', p, e.message); return []; }
+}
+
+function mergeAndSaveTxns(connName, accountId, newTxns) {
+  const existing = loadStoredTxns(connName, accountId);
+  const byId = {};
+  existing.forEach(function(t) { if (t.transaction_id) byId[t.transaction_id] = t; });
+  let added = 0;
+  newTxns.forEach(function(t) {
+    if (!t.transaction_id || !byId[t.transaction_id]) {
+      byId[t.transaction_id || ('_' + Math.random())] = t;
+      added++;
+    }
+  });
+  const merged = Object.values(byId);
+  merged.sort(function(a, b) { return (b.timestamp || '').localeCompare(a.timestamp || ''); });
+  fs.writeFileSync(txnPath(connName, accountId), JSON.stringify(merged, null, 2));
+  return { total: merged.length, added: added };
+}
+
+function loadStoredTxnCount(connName, accountId) {
+  return loadStoredTxns(connName, accountId).length;
+}
+
+// ── Other helpers ─────────────────────────────────────────────────────────────
 
 function lastSyncedFor(connState) {
   if (!connState || !connState.accounts) return null;
   const dates = Object.values(connState.accounts)
     .map(function(a) { return a.lastSyncDate; })
-    .filter(Boolean)
-    .sort();
+    .filter(Boolean).sort();
   return dates.length ? dates[dates.length - 1] : null;
 }
 
@@ -110,52 +144,32 @@ function buildRows(savedAccounts, liveAccounts) {
     const rows = liveAccounts.map(function(acc) {
       const saved = savedAccounts.find(function(a) { return a.trueLayerId === acc.account_id; });
       const defaultName = acc.display_name || acc.account_type || '';
-      return {
-        trueLayerId: acc.account_id,
-        displayName: defaultName,
-        actualId: saved ? saved.actualId : '',
-        friendlyName: saved ? saved.friendlyName : defaultName,
-        flip: saved ? !!saved.flip : false,
-        stale: false,
-      };
+      return { trueLayerId: acc.account_id, displayName: defaultName,
+        actualId: saved ? saved.actualId : '', friendlyName: saved ? saved.friendlyName : defaultName,
+        flip: saved ? !!saved.flip : false, stale: false };
     });
     savedAccounts.forEach(function(saved) {
       if (!liveAccounts.find(function(a) { return a.account_id === saved.trueLayerId; })) {
-        rows.push({
-          trueLayerId: saved.trueLayerId,
-          displayName: saved.friendlyName || saved.trueLayerId,
-          actualId: saved.actualId,
-          friendlyName: saved.friendlyName,
-          flip: !!saved.flip,
-          stale: true,
-        });
+        rows.push({ trueLayerId: saved.trueLayerId, displayName: saved.friendlyName || saved.trueLayerId,
+          actualId: saved.actualId, friendlyName: saved.friendlyName, flip: !!saved.flip, stale: true });
       }
     });
     return rows;
   }
   if (savedAccounts.length === 0) return [];
   return savedAccounts.map(function(saved) {
-    return {
-      trueLayerId: saved.trueLayerId,
-      displayName: saved.friendlyName || saved.trueLayerId,
-      actualId: saved.actualId,
-      friendlyName: saved.friendlyName,
-      flip: !!saved.flip,
-      stale: false,
-    };
+    return { trueLayerId: saved.trueLayerId, displayName: saved.friendlyName || saved.trueLayerId,
+      actualId: saved.actualId, friendlyName: saved.friendlyName, flip: !!saved.flip, stale: false };
   });
 }
 
-/** Exchange a refresh token for a new access token, persisting any rotated token. */
 async function getAccessToken(connName, connState) {
   const tokenRes = await fetch(AUTH_URL + '/connect/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      refresh_token: connState.refreshToken,
+      grant_type: 'refresh_token', client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET, refresh_token: connState.refreshToken,
     }),
   });
   const tokenData = await tokenRes.json();
@@ -174,45 +188,36 @@ async function getAccessToken(connName, connState) {
 // ── Shared CSS ────────────────────────────────────────────────────────────────
 const SHARED_CSS = `
   *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 24px 20px 60px; background: #f5f5f5; color: #1a1a1a; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px 20px 60px; background: #f5f5f5; color: #1a1a1a; }
   h1 { margin: 0 0 4px; font-size: 1.4em; }
   h2 { font-size: 1.1em; margin: 0 0 12px; }
   a { color: #0066cc; }
   code { background: #eee; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; font-family: monospace; }
   pre { background: #f0f0f0; padding: 12px; border-radius: 4px; font-size: 0.88em; overflow-x: auto; }
   .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px 20px; margin: 10px 0; }
-  .tag { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 0.78em; font-weight: 600;
-         background: #e8f0fe; color: #1a73e8; margin-left: 6px; vertical-align: middle; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 0.78em; font-weight: 600; background: #e8f0fe; color: #1a73e8; margin-left: 6px; vertical-align: middle; }
   .notice { padding: 11px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9em; line-height: 1.6; }
   .notice.success { background: #e6f4ea; border-left: 4px solid #137333; color: #137333; }
   .notice.error   { background: #fce8e6; border-left: 4px solid #c5221f; color: #9b1c1c; }
   .notice.info    { background: #fef7e0; border-left: 4px solid #f9ab00; color: #7a5c00; }
   .notice.warn    { background: #fff8e1; border-left: 4px solid #e65100; color: #7a3800; }
-  .btn { display: inline-block; padding: 7px 16px; border-radius: 5px; font-size: 0.88em; font-weight: 600;
-         text-decoration: none; cursor: pointer; border: none; margin-right: 6px; }
-  .btn-primary { background: #0066cc; color: #fff; }
-  .btn-primary:hover { background: #0052a3; }
-  .btn-secondary { background: #555; color: #fff; }
-  .btn-secondary:hover { background: #333; }
-  .btn-danger { background: #c5221f; color: #fff; }
-  .btn-danger:hover { background: #9b1c1c; }
-  .btn-ghost { background: #eee; color: #333; }
-  .btn-ghost:hover { background: #ddd; }
-  .btn-green { background: #137333; color: #fff; }
-  .btn-green:hover { background: #0a5227; }
-  .mode-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-weight: 700;
-    font-size: 0.8em; margin-left: 8px; vertical-align: middle; }
+  .btn { display: inline-block; padding: 7px 16px; border-radius: 5px; font-size: 0.88em; font-weight: 600; text-decoration: none; cursor: pointer; border: none; margin-right: 6px; }
+  .btn-primary   { background: #0066cc; color: #fff; } .btn-primary:hover   { background: #0052a3; }
+  .btn-secondary { background: #555;    color: #fff; } .btn-secondary:hover { background: #333; }
+  .btn-danger    { background: #c5221f; color: #fff; } .btn-danger:hover    { background: #9b1c1c; }
+  .btn-ghost     { background: #eee;    color: #333; } .btn-ghost:hover     { background: #ddd; }
+  .btn-green     { background: #137333; color: #fff; } .btn-green:hover     { background: #0a5227; }
+  .btn-orange    { background: #e65100; color: #fff; } .btn-orange:hover    { background: #bf360c; }
+  .mode-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-weight: 700; font-size: 0.8em; margin-left: 8px; vertical-align: middle; }
   .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:100; align-items:center; justify-content:center; }
   .modal-overlay.open { display:flex; }
-  .modal { background:#fff; border-radius:10px; padding:24px 28px; max-width:400px; width:90%; box-shadow:0 8px 32px rgba(0,0,0,0.18); }
-  .modal h3 { margin:0 0 10px; }
-  .modal p  { margin:0 0 20px; font-size:0.9em; color:#555; }
+  .modal { background:#fff; border-radius:10px; padding:24px 28px; max-width:420px; width:90%; box-shadow:0 8px 32px rgba(0,0,0,0.18); }
+  .modal h3 { margin:0 0 10px; } .modal p { margin:0 0 20px; font-size:0.9em; color:#555; }
   .modal-actions { display:flex; gap:10px; justify-content:flex-end; }
   table.env-table { width:100%; border-collapse:collapse; font-size:0.88em; }
   table.env-table td { padding:5px 8px; }
   table.env-table td:first-child { font-weight:600; color:#555; width:140px; white-space:nowrap; }
-  .security-banner { background:#fff3e0; border:1px solid #ff9800; border-radius:6px; padding:10px 14px;
-    font-size:0.85em; color:#7a3800; margin-bottom:18px; line-height:1.6; }
+  .security-banner { background:#fff3e0; border:1px solid #ff9800; border-radius:6px; padding:10px 14px; font-size:0.85em; color:#7a3800; margin-bottom:18px; line-height:1.6; }
   .security-banner strong { color:#e65100; }
   .last-synced { font-size:0.8em; color:#666; margin-top:4px; }
   .last-synced.overdue { color:#c5221f; font-weight:600; }
@@ -234,8 +239,8 @@ const SHARED_CSS = `
   .txn-table .amt-zero   { color:#888; text-align:right; white-space:nowrap; }
   .txn-section { margin-bottom:32px; }
   .txn-section h3 { font-size:1em; margin:0 0 8px; }
-  .spinner { display:inline-block; width:18px; height:18px; border:3px solid #ccc;
-             border-top-color:#0066cc; border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }
+  .pending-badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:0.75em; font-weight:600; background:#fff3e0; color:#e65100; margin-left:6px; }
+  .spinner { display:inline-block; width:18px; height:18px; border:3px solid #ccc; border-top-color:#0066cc; border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }
   @keyframes spin { to { transform:rotate(360deg); } }
 `;
 
@@ -247,7 +252,7 @@ function page(title, body) {
     + '</head><body>' + body + '</body></html>';
 }
 
-// ── Balances page client-side script (kept as a plain string to avoid nested backticks) ──
+// ── Balances page client-side script ─────────────────────────────────────────
 const BALANCES_SCRIPT = `
 <script>
   async function loadData() {
@@ -258,19 +263,44 @@ const BALANCES_SCRIPT = `
     status.textContent = '';
     document.getElementById('content').innerHTML =
       '<div style="padding:40px;text-align:center;color:#666"><span class="spinner"></span> Fetching\u2026</div>';
-
     try {
-      var res  = await fetch(window.__apiUrl);
+      var days = document.getElementById('daysSelect') ? document.getElementById('daysSelect').value : 90;
+      var res  = await fetch(window.__apiUrl + '?days=' + days);
       var data = await res.json();
       if (data.error) throw new Error(data.error);
       renderData(data);
       status.textContent = 'Updated ' + new Date().toLocaleTimeString();
     } catch (e) {
-      document.getElementById('content').innerHTML =
-        '<div class="notice error">\u26a0\ufe0f ' + e.message + '</div>';
+      document.getElementById('content').innerHTML = '<div class="notice error">\u26a0\ufe0f ' + e.message + '</div>';
     } finally {
       btn.disabled = false;
       btn.textContent = '\u27f3 Refresh data';
+    }
+  }
+
+  async function fetchFullHistory() {
+    var btn = document.getElementById('historyBtn');
+    var status = document.getElementById('fetchStatus');
+    btn.disabled = true;
+    btn.textContent = '\u23f3 Fetching full history\u2026';
+    status.textContent = '';
+    document.getElementById('content').innerHTML =
+      '<div style="padding:40px;text-align:center;color:#666"><span class="spinner"></span> Fetching up to 2 years of transactions\u2026 This may take a moment.</div>';
+    try {
+      var res  = await fetch(window.__historyUrl);
+      var data = await res.json();
+      if (data.error) throw new Error(data.error);
+      var msg = data.results.map(function(r) {
+        return (r.friendlyName || r.trueLayerId) + ': +' + r.added + ' new (' + r.total + ' stored)';
+      }).join('<br>');
+      document.getElementById('content').innerHTML = '<div class="notice success">\u2705 Full history fetched!<br>' + msg + '</div>';
+      status.textContent = 'Stored to data/transactions/';
+      loadData();
+    } catch (e) {
+      document.getElementById('content').innerHTML = '<div class="notice error">\u26a0\ufe0f ' + e.message + '</div>';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '\ud83d\udcbe Fetch full history (2 years)';
     }
   }
 
@@ -286,15 +316,39 @@ const BALANCES_SCRIPT = `
     return amount > 0 ? 'amt-credit' : 'amt-debit';
   }
 
+  function renderTxnTable(txns, includePendingBadge) {
+    if (txns.length === 0) return '<p style="color:#888;font-size:0.88em">No transactions found.</p>';
+    var html = '<div style="overflow-x:auto"><table class="txn-table">'
+      + '<thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Amount</th><th>Running balance</th>'
+      + (includePendingBadge ? '<th>Status</th>' : '') + '</tr></thead><tbody>';
+    txns.forEach(function(t) {
+      var date   = t.timestamp ? t.timestamp.slice(0, 10) : '\u2014';
+      var desc   = t.description || t.merchant_name || '\u2014';
+      var cat    = t.transaction_category || '\u2014';
+      var cls2   = amtClass(t.amount);
+      var sign   = t.amount > 0 ? '+' : '';
+      var amt    = t.amount != null ? sign + fmt(t.amount, t.currency) : '\u2014';
+      var runBal = (t.running_balance != null) ? fmt(t.running_balance.amount, t.running_balance.currency) : '\u2014';
+      html += '<tr>'
+            + '<td style="white-space:nowrap">' + date + '</td>'
+            + '<td>' + desc + '</td>'
+            + '<td style="color:#666;font-size:0.9em">' + cat + '</td>'
+            + '<td class="' + cls2 + '">' + amt + '</td>'
+            + '<td style="color:#666;text-align:right;white-space:nowrap">' + runBal + '</td>';
+      if (includePendingBadge) html += '<td><span class="pending-badge">Pending</span></td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+  }
+
   function renderData(data) {
     var html = '<div class="balance-grid">';
-
     data.accounts.forEach(function(acc) {
       var b   = acc.balance;
       var cur = b ? fmt(b.current, b.currency) : '\u2014';
       var avl = (b && b.available != null) ? fmt(b.available, b.currency) : null;
       var cls = (b && b.current != null) ? (b.current >= 0 ? 'positive' : 'negative') : '';
-
       html += '<div class="balance-card">'
             +   '<div class="acc-name">' + (acc.friendlyName || acc.displayName) + '</div>'
             +   '<div class="acc-id">'   + acc.trueLayerId + '</div>'
@@ -304,44 +358,32 @@ const BALANCES_SCRIPT = `
         html += '<div class="bal-row"><span class="bal-label">Available</span>'
               +   '<span class="bal-amount">' + avl + '</span></div>';
       }
+      if (acc.storedCount != null) {
+        html += '<div class="bal-row"><span class="bal-label">Stored locally</span>'
+              +   '<span style="font-size:0.9em;color:#555">' + acc.storedCount + ' transactions</span></div>';
+      }
       if (acc.balanceError) {
         html += '<div style="font-size:0.78em;color:#c5221f;margin-top:6px">\u26a0\ufe0f ' + acc.balanceError + '</div>';
       }
       html += '</div>';
     });
-
     html += '</div>';
 
     data.accounts.forEach(function(acc) {
-      var txns = acc.transactions || [];
+      var txns    = acc.transactions || [];
+      var pending = acc.pendingTransactions || [];
       html += '<div class="txn-section"><h3>\ud83d\udccb ' + (acc.friendlyName || acc.displayName)
-            + ' \u2014 recent transactions (' + txns.length + ')</h3>';
-
+            + ' \u2014 transactions (' + txns.length + ' shown';
+      if (acc.storedCount) html += ', ' + acc.storedCount + ' stored';
+      html += ')</h3>';
       if (acc.txnError) {
         html += '<div class="notice error" style="font-size:0.88em">\u26a0\ufe0f ' + acc.txnError + '</div>';
-      } else if (txns.length === 0) {
-        html += '<p style="color:#888;font-size:0.88em">No transactions found.</p>';
       } else {
-        html += '<div style="overflow-x:auto"><table class="txn-table">'
-              + '<thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Amount</th><th>Running balance</th></tr></thead>'
-              + '<tbody>';
-        txns.forEach(function(t) {
-          var date   = t.timestamp ? t.timestamp.slice(0, 10) : '\u2014';
-          var desc   = t.description || t.merchant_name || '\u2014';
-          var cat    = t.transaction_category || '\u2014';
-          var cls2   = amtClass(t.amount);
-          var sign   = t.amount > 0 ? '+' : '';
-          var amt    = t.amount != null ? sign + fmt(t.amount, t.currency) : '\u2014';
-          var runBal = (t.running_balance != null) ? fmt(t.running_balance.amount, t.running_balance.currency) : '\u2014';
-          html += '<tr>'
-                + '<td style="white-space:nowrap">' + date + '</td>'
-                + '<td>' + desc + '</td>'
-                + '<td style="color:#666;font-size:0.9em">' + cat + '</td>'
-                + '<td class="' + cls2 + '">' + amt + '</td>'
-                + '<td style="color:#666;text-align:right;white-space:nowrap">' + runBal + '</td>'
-                + '</tr>';
-        });
-        html += '</tbody></table></div>';
+        html += renderTxnTable(txns, false);
+      }
+      if (pending.length > 0) {
+        html += '<h3 style="margin-top:20px">\u23f3 Pending (' + pending.length + ')</h3>';
+        html += renderTxnTable(pending, true);
       }
       html += '</div>';
     });
@@ -354,27 +396,19 @@ const BALANCES_SCRIPT = `
 
 function renderMappingPage(name, conn, rows, notice) {
   const allIds = rows.map(function(r) { return r.trueLayerId; }).join(',');
-
   const tableRows = rows.map(function(r) {
     return '<tr' + (r.stale ? ' style="opacity:0.55"' : '') + '>'
       + '<td>' + r.displayName + (r.stale ? ' <span class="tag" style="background:#fce8e6;color:#c5221f">not in live list</span>' : '') + '</td>'
       + '<td><code style="font-size:0.78em">' + r.trueLayerId + '</code></td>'
-      + '<td><input style="width:100%;padding:5px;border:1px solid #ccc;border-radius:3px"'
-      +      ' name="actualId_' + r.trueLayerId + '" value="' + r.actualId + '" placeholder="Paste Actual account ID"></td>'
-      + '<td><input style="width:100%;padding:5px;border:1px solid #ccc;border-radius:3px"'
-      +      ' name="friendlyName_' + r.trueLayerId + '" value="' + r.friendlyName + '" placeholder="e.g. Main Current Account"></td>'
+      + '<td><input style="width:100%;padding:5px;border:1px solid #ccc;border-radius:3px" name="actualId_' + r.trueLayerId + '" value="' + r.actualId + '" placeholder="Paste Actual account ID"></td>'
+      + '<td><input style="width:100%;padding:5px;border:1px solid #ccc;border-radius:3px" name="friendlyName_' + r.trueLayerId + '" value="' + r.friendlyName + '" placeholder="e.g. Main Current Account"></td>'
       + '<td style="text-align:center"><input type="checkbox" name="flip_' + r.trueLayerId + '" ' + (r.flip ? 'checked' : '') + '></td>'
       + '</tr>';
   }).join('');
-
   const emptyState = rows.length === 0
-    ? '<tr><td colspan="5" style="text-align:center;padding:28px;color:#888">'
-      + 'No accounts yet \u2014 click <strong>Sync from bank</strong> above to discover accounts from TrueLayer.'
-      + '</td></tr>'
+    ? '<tr><td colspan="5" style="text-align:center;padding:28px;color:#888">No accounts yet \u2014 click <strong>Sync from bank</strong> above.</td></tr>'
     : '';
-
   const hasActualCreds = ACTUAL_URL && ACTUAL_PASS;
-
   return page('Map Accounts \u2014 ' + name,
     '<p style="margin:0 0 16px"><a href="/">\u2190 Home</a></p>'
     + '<h1>\ud83d\udcc2 Map Accounts \u2014 ' + name + '</h1>'
@@ -382,17 +416,14 @@ function renderMappingPage(name, conn, rows, notice) {
     + '<div class="notice info" style="margin-bottom:16px">'
     +   '<strong>How to find your Actual Budget account ID</strong><br>'
     +   (hasActualCreds
-        ? 'Click <strong>Browse Actual accounts</strong> below to see all your Actual Budget accounts and their IDs.'
-        : 'Run the sync container once with <code>--dry-run</code> to list IDs:<br>'
-          + '<code>docker compose run --rm truelayer-sync --dry-run</code><br>'
-          + 'Or open Actual Budget \u2192 Settings \u2192 Advanced \u2192 copy the ID next to the account.')
+        ? 'Click <strong>Browse Actual accounts</strong> below.'
+        : 'Open Actual Budget \u2192 Settings \u2192 Advanced \u2192 copy the ID next to the account.')
     +   '<br><br><strong>Friendly Name</strong> is shown in sync logs only.<br>'
     +   '<strong>Flip</strong> inverts transaction amounts \u2014 useful if your bank reports credits as negative.'
     + '</div>'
     + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">'
     +   '<a class="btn btn-secondary" href="/accounts/' + encodeURIComponent(name) + '/refresh">\u27f3 Sync from bank</a>'
     +   (hasActualCreds ? '<a class="btn btn-ghost" href="/actual-accounts" target="_blank">\ud83d\udd0d Browse Actual accounts</a>' : '')
-    +   '<span style="font-size:0.82em;color:#888">Fetches the latest account list from TrueLayer.</span>'
     + '</div>'
     + '<form action="/save-mapping/' + encodeURIComponent(name) + '" method="POST" onsubmit="return validateForm(event)">'
     +   '<div style="overflow-x:auto">'
@@ -406,16 +437,13 @@ function renderMappingPage(name, conn, rows, notice) {
     +     '</tr></thead>'
     +     '<tbody id="tableBody">' + tableRows + emptyState + '</tbody>'
     +   '</table></div>'
-    +   '<div style="background:#fff3cd;border:1px solid #ffc107;padding:10px 14px;border-radius:4px;margin-top:12px;font-size:0.88em;display:none" id="warn">'
-    +     '\u26a0\ufe0f No accounts have an Actual Budget ID filled in. At least one is required to save.'
-    +   '</div>'
     +   '<input type="hidden" name="allIds" value="' + allIds + '">'
     +   (rows.length > 0 ? '<button class="btn btn-primary" type="submit" style="margin-top:14px">\ud83d\udcbe Save Mappings</button>' : '')
     + '</form>'
     + '<script>function validateForm(e){'
     +   'var ids=document.querySelectorAll(\'input[name^="actualId_"]\');'
     +   'var any=Array.from(ids).some(function(i){return i.value.trim();});'
-    +   'if(!any){e.preventDefault();document.getElementById(\'warn\').style.display=\'block\';return false;}'
+    +   'if(!any){e.preventDefault();alert("Fill in at least one Actual Budget account ID.");return false;}'
     +   'return true;}'
     + '<\/script>'
   );
@@ -436,6 +464,9 @@ app.get('/', function(req, res) {
         const lastSynced = lastSyncedFor(connState);
         const rel        = relativeTime(lastSynced);
         const overdue    = lastSynced && (Date.now() - new Date(lastSynced).getTime()) > 6 * 60 * 60 * 1000;
+        const storedTotal = c.accounts.reduce(function(sum, a) {
+          return sum + loadStoredTxnCount(c.name, a.trueLayerId);
+        }, 0);
         return '<div class="card">'
           + '<div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>'
           + '<strong style="font-size:1.05em">' + c.name + '</strong>'
@@ -443,6 +474,7 @@ app.get('/', function(req, res) {
           + '<span class="tag" style="background:' + (hasToken ? '#e6f4ea' : '#fce8e6') + ';color:' + (hasToken ? '#137333' : '#c5221f') + '">'
           + (hasToken ? '\u2705 Authorised' : '\u26a0\ufe0f No token') + '</span>'
           + '<span class="tag">' + c.accounts.length + ' account' + (c.accounts.length !== 1 ? 's' : '') + ' mapped</span>'
+          + (storedTotal > 0 ? '<span class="tag" style="background:#e8f5e9;color:#2e7d32">' + storedTotal + ' txns stored</span>' : '')
           + (rel
               ? '<div class="last-synced' + (overdue ? ' overdue' : '') + '">Last synced: ' + rel + (overdue ? ' \u2014 may be overdue' : '') + '</div>'
               : '<div class="last-synced">Not yet synced</div>')
@@ -461,9 +493,7 @@ app.get('/', function(req, res) {
     + '<span class="mode-badge" style="background:' + (SANDBOX ? '#f9ab00' : '#1a73e8') + ';color:#fff">' + (SANDBOX ? 'SANDBOX' : 'LIVE') + '</span>'
     + '</h1>'
     + '<div class="security-banner">'
-    +   '\u26a0\ufe0f <strong>Security reminder:</strong> This setup UI exposes your TrueLayer credentials. '
-    +   'Run it on demand only \u2014 tear it down when you\'re done: '
-    +   '<code>docker compose --profile setup down truelayer-setup</code>'
+    +   '\u26a0\ufe0f <strong>Security reminder:</strong> This setup UI exposes your TrueLayer credentials. Run it on demand only.'
     + '</div>'
     + '<div class="notice ' + (missingCreds ? 'error' : SANDBOX ? 'info' : 'success') + '" style="margin-bottom:20px">'
     +   '<table class="env-table">'
@@ -473,14 +503,10 @@ app.get('/', function(req, res) {
     +     '</td></tr>'
     +     '<tr><td>Client Secret</td><td><code>' + maskSecret(CLIENT_SECRET) + '</code></td></tr>'
     +     '<tr><td>Redirect URI</td><td><code>' + REDIRECT_URI + '</code></td></tr>'
-    +     '<tr><td>Auth endpoint</td><td><code>' + AUTH_URL + '</code></td></tr>'
-    +     '<tr><td>API endpoint</td><td><code>' + API_URL + '</code></td></tr>'
     +   '</table>'
     +   (missingCreds ? '<br>\u26a0\ufe0f <strong>Missing credentials \u2014 check your .env file.</strong>' : '')
     + '</div>'
     + '<div class="card"><h2>Add Bank Connection</h2>'
-    +   '<p style="font-size:0.9em;color:#555;margin:0 0 12px">You\'ll be redirected to TrueLayer to choose and authorise your bank. '
-    +   'The connection name is set automatically from the bank\'s display name.</p>'
     +   '<form action="/start-auth" method="POST" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
     +     '<select name="isCard" style="padding:7px 10px;border:1px solid #ccc;border-radius:5px;font-size:0.9em">'
     +       '<option value="false">Bank Account</option>'
@@ -493,7 +519,7 @@ app.get('/', function(req, res) {
     + connCards
     + '<div class="modal-overlay" id="deleteModal">'
     +   '<div class="modal"><h3>Remove connection?</h3>'
-    +     '<p>This will delete <strong id="deleteName"></strong> and its refresh token. Sync will stop for this bank until you re-add it.</p>'
+    +     '<p>This will delete <strong id="deleteName"></strong> and its refresh token.</p>'
     +     '<div class="modal-actions">'
     +       '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'
     +       '<a class="btn btn-danger" id="deleteLink" href="#">Remove</a>'
@@ -512,7 +538,7 @@ app.get('/', function(req, res) {
   ));
 });
 
-// ── Balances & Transactions ───────────────────────────────────────────────────
+// ── Balances & Transactions page ──────────────────────────────────────────────
 app.get('/balances/:name', async function(req, res) {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
@@ -528,28 +554,135 @@ app.get('/balances/:name', async function(req, res) {
       + '<a href="/reauth/' + encodeURIComponent(name) + '">re-authorise first</a>.</div>'));
   }
 
-  const apiUrl = '/api/balances/' + encodeURIComponent(name);
+  const apiUrl     = '/api/balances/' + encodeURIComponent(name);
+  const historyUrl = '/api/fetch-history/' + encodeURIComponent(name);
 
   res.send(page('Balances & Transactions \u2014 ' + name,
     '<p style="margin:0 0 16px"><a href="/">\u2190 Home</a></p>'
     + '<h1>\ud83d\udcb0 Balances &amp; Transactions \u2014 ' + name + '</h1>'
-    + '<p style="font-size:0.85em;color:#666;margin-bottom:18px">Live data from TrueLayer. Showing last 50 transactions per account.</p>'
     + '<div style="margin-bottom:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+    +   '<select id="daysSelect" style="padding:6px 10px;border:1px solid #ccc;border-radius:5px;font-size:0.88em">'
+    +     '<option value="30">Last 30 days</option>'
+    +     '<option value="90" selected>Last 90 days</option>'
+    +     '<option value="180">Last 6 months</option>'
+    +     '<option value="365">Last 1 year</option>'
+    +     '<option value="stored">Stored transactions only</option>'
+    +   '</select>'
     +   '<button class="btn btn-green" id="refreshBtn" onclick="loadData()">\u27f3 Refresh data</button>'
+    +   '<button class="btn btn-orange" id="historyBtn" onclick="fetchFullHistory()">\ud83d\udcbe Fetch full history (2 years)</button>'
     +   '<span id="fetchStatus" style="font-size:0.85em;color:#666"></span>'
     + '</div>'
     + '<div id="content">'
     +   '<div style="padding:40px;text-align:center;color:#666">'
-    +     '<span class="spinner"></span> Fetching balances and transactions from TrueLayer\u2026'
+    +     '<span class="spinner"></span> Fetching\u2026'
     +   '</div>'
     + '</div>'
-    + '<script>window.__apiUrl = "' + apiUrl + '";<\/script>'
+    + '<script>window.__apiUrl = "' + apiUrl + '"; window.__historyUrl = "' + historyUrl + '";<\/script>'
     + BALANCES_SCRIPT
   ));
 });
 
 // ── API: fetch balances + transactions ────────────────────────────────────────
 app.get('/api/balances/:name', async function(req, res) {
+  const name = decodeURIComponent(req.params.name);
+  const days = req.query.days;
+  const config = loadConfig();
+  const conn   = config.connections.find(function(c) { return c.name === name; });
+  if (!conn) return res.status(404).json({ error: 'Connection not found' });
+
+  const state     = loadState();
+  const connState = state.connections[name];
+  if (!connState) return res.status(401).json({ error: 'No token \u2014 re-authorise first' });
+
+  const results = [];
+
+  // If "stored" mode, just return local transactions without hitting API
+  if (days === 'stored') {
+    for (const saved of conn.accounts) {
+      const stored = loadStoredTxns(name, saved.trueLayerId);
+      results.push({
+        trueLayerId: saved.trueLayerId, friendlyName: saved.friendlyName,
+        displayName: saved.friendlyName || saved.trueLayerId,
+        balance: null, balanceError: null,
+        transactions: stored, pendingTransactions: [],
+        storedCount: stored.length,
+      });
+    }
+    return res.json({ accounts: results });
+  }
+
+  let accessToken;
+  try {
+    accessToken = await getAccessToken(name, connState);
+  } catch (e) {
+    return res.status(401).json({ error: 'Token refresh failed: ' + e.message });
+  }
+
+  const endpoint = conn.isCard ? 'cards' : 'accounts';
+  let liveAccounts = [];
+  try {
+    const r = await fetch(API_URL + '/data/v1/' + endpoint, { headers: { Authorization: 'Bearer ' + accessToken } });
+    const d = await r.json();
+    liveAccounts = d.results || [];
+  } catch (_) {}
+
+  const daysNum = parseInt(days, 10) || 90;
+  const from = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const to   = new Date().toISOString().slice(0, 10);
+
+  for (const saved of conn.accounts) {
+    const live = liveAccounts.find(function(a) { return a.account_id === saved.trueLayerId; });
+    const entry = {
+      trueLayerId:  saved.trueLayerId,
+      friendlyName: saved.friendlyName,
+      displayName:  live ? (live.display_name || live.account_type || saved.trueLayerId) : saved.trueLayerId,
+      balance: null, balanceError: null,
+      transactions: [], pendingTransactions: [], txnError: null,
+      storedCount: loadStoredTxnCount(name, saved.trueLayerId),
+    };
+
+    // Balance
+    try {
+      const balRes  = await fetch(API_URL + '/data/v1/' + endpoint + '/' + saved.trueLayerId + '/balance', {
+        headers: { Authorization: 'Bearer ' + accessToken },
+      });
+      const balData = await balRes.json();
+      entry.balance = (balData.results || [])[0] || null;
+      if (!entry.balance && balData.error) entry.balanceError = balData.error;
+    } catch (e) { entry.balanceError = e.message; }
+
+    // Transactions
+    try {
+      const txnBase = API_URL + '/data/v1/' + endpoint + '/' + saved.trueLayerId + '/transactions';
+      const txnRes  = await fetch(txnBase + '?from=' + from + '&to=' + to, {
+        headers: { Authorization: 'Bearer ' + accessToken },
+      });
+      const txnData = await txnRes.json();
+      const all = txnData.results || [];
+      all.sort(function(a, b) { return (b.timestamp || '').localeCompare(a.timestamp || ''); });
+      entry.transactions = all;
+      if (all.length === 0 && txnData.error) entry.txnError = txnData.error;
+      // Auto-merge into local store
+      if (all.length > 0) mergeAndSaveTxns(name, saved.trueLayerId, all);
+      entry.storedCount = loadStoredTxnCount(name, saved.trueLayerId);
+    } catch (e) { entry.txnError = e.message; }
+
+    // Pending transactions
+    try {
+      const pendBase = API_URL + '/data/v1/' + endpoint + '/' + saved.trueLayerId + '/transactions/pending';
+      const pendRes  = await fetch(pendBase, { headers: { Authorization: 'Bearer ' + accessToken } });
+      const pendData = await pendRes.json();
+      entry.pendingTransactions = pendData.results || [];
+    } catch (_) {}
+
+    results.push(entry);
+  }
+
+  res.json({ accounts: results });
+});
+
+// ── API: fetch full 2-year history and store ──────────────────────────────────
+app.get('/api/fetch-history/:name', async function(req, res) {
   const name = decodeURIComponent(req.params.name);
   const config = loadConfig();
   const conn   = config.connections.find(function(c) { return c.name === name; });
@@ -567,63 +700,31 @@ app.get('/api/balances/:name', async function(req, res) {
   }
 
   const endpoint = conn.isCard ? 'cards' : 'accounts';
-
-  let liveAccounts = [];
-  try {
-    const r = await fetch(API_URL + '/data/v1/' + endpoint, {
-      headers: { Authorization: 'Bearer ' + accessToken },
-    });
-    const d = await r.json();
-    liveAccounts = d.results || [];
-  } catch (_) {}
-
+  const from = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const to   = new Date().toISOString().slice(0, 10);
   const results = [];
 
   for (const saved of conn.accounts) {
-    const live = liveAccounts.find(function(a) { return a.account_id === saved.trueLayerId; });
-    const entry = {
-      trueLayerId:  saved.trueLayerId,
-      friendlyName: saved.friendlyName,
-      displayName:  live ? (live.display_name || live.account_type || saved.trueLayerId) : saved.trueLayerId,
-      balance:      null,
-      balanceError: null,
-      transactions: [],
-      txnError:     null,
-    };
-
+    const result = { trueLayerId: saved.trueLayerId, friendlyName: saved.friendlyName, added: 0, total: 0, error: null };
     try {
-      const balRes  = await fetch(API_URL + '/data/v1/' + endpoint + '/' + saved.trueLayerId + '/balance', {
-        headers: { Authorization: 'Bearer ' + accessToken },
-      });
-      const balData = await balRes.json();
-      entry.balance = (balData.results || [])[0] || null;
-      if (!entry.balance && balData.error) entry.balanceError = balData.error;
-    } catch (e) {
-      entry.balanceError = e.message;
-    }
-
-    try {
-      const txnBase = conn.isCard
-        ? API_URL + '/data/v1/cards/' + saved.trueLayerId + '/transactions'
-        : API_URL + '/data/v1/accounts/' + saved.trueLayerId + '/transactions';
-      const from = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-      const to   = new Date().toISOString().slice(0, 10);
+      const txnBase = API_URL + '/data/v1/' + endpoint + '/' + saved.trueLayerId + '/transactions';
       const txnRes  = await fetch(txnBase + '?from=' + from + '&to=' + to, {
         headers: { Authorization: 'Bearer ' + accessToken },
       });
       const txnData = await txnRes.json();
-      const all = txnData.results || [];
-      all.sort(function(a, b) { return (b.timestamp || '').localeCompare(a.timestamp || ''); });
-      entry.transactions = all.slice(0, 50);
-      if (entry.transactions.length === 0 && txnData.error) entry.txnError = txnData.error;
+      if (txnData.error) throw new Error(txnData.error);
+      const counts = mergeAndSaveTxns(name, saved.trueLayerId, txnData.results || []);
+      result.added = counts.added;
+      result.total = counts.total;
+      console.log('[history] ' + name + '/' + saved.trueLayerId + ': +' + counts.added + ' new, ' + counts.total + ' total stored');
     } catch (e) {
-      entry.txnError = e.message;
+      result.error = e.message;
+      console.error('[history] Error for ' + saved.trueLayerId + ':', e.message);
     }
-
-    results.push(entry);
+    results.push(result);
   }
 
-  res.json({ accounts: results });
+  res.json({ results: results });
 });
 
 // ── Status JSON ───────────────────────────────────────────────────────────────
@@ -635,11 +736,11 @@ app.get('/status', function(req, res) {
     connections: config.connections.map(function(c) {
       const cs = state.connections[c.name];
       return {
-        name: c.name,
-        isCard: !!c.isCard,
-        accountsMapped: c.accounts.length,
-        hasToken: !!cs,
-        lastSyncDate: lastSyncedFor(cs),
+        name: c.name, isCard: !!c.isCard, accountsMapped: c.accounts.length,
+        hasToken: !!cs, lastSyncDate: lastSyncedFor(cs),
+        storedTransactions: c.accounts.reduce(function(sum, a) {
+          return sum + loadStoredTxnCount(c.name, a.trueLayerId);
+        }, 0),
       };
     }),
   });
@@ -649,37 +750,32 @@ app.get('/status', function(req, res) {
 app.get('/actual-accounts', async function(req, res) {
   if (!ACTUAL_URL || !ACTUAL_PASS) {
     return res.status(400).send(page('Actual Accounts',
-      '<div class="notice error">ACTUAL_SERVER_URL or ACTUAL_SERVER_PASSWORD not set in environment.</div>'
+      '<div class="notice error">ACTUAL_SERVER_URL or ACTUAL_SERVER_PASSWORD not set.</div>'
       + '<p><a href="/">\u2190 Home</a></p>'));
   }
-
   try {
     const authRes  = await fetch(ACTUAL_URL + '/account/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ loginMethod: 'password', password: ACTUAL_PASS }),
     });
     const authData = await authRes.json();
     const token    = authData.data && authData.data.token;
     if (!token) throw new Error('Login failed: ' + JSON.stringify(authData));
 
-    const budgetsRes  = await fetch(ACTUAL_URL + '/sync/list', {
-      headers: { 'x-actual-token': token },
-    });
+    const budgetsRes  = await fetch(ACTUAL_URL + '/sync/list', { headers: { 'x-actual-token': token } });
     const budgetsData = await budgetsRes.json();
     const budgets     = budgetsData.data || [];
 
     if (budgets.length === 0) {
       return res.send(page('Actual Accounts',
-        '<p><a href="/">\u2190 Home</a></p><div class="notice info">No budgets found in your Actual instance.</div>'));
+        '<p><a href="/">\u2190 Home</a></p><div class="notice info">No budgets found.</div>'));
     }
 
     const sections = [];
     for (const budget of budgets) {
       try {
         const dlRes  = await fetch(ACTUAL_URL + '/sync/download-user-file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-actual-token': token },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-actual-token': token },
           body: JSON.stringify({ fileId: budget.fileId }),
         });
         const dlData   = await dlRes.json();
@@ -699,7 +795,7 @@ app.get('/actual-accounts', async function(req, res) {
               : '<table style="width:100%;border-collapse:collapse;font-size:0.88em">'
                 + '<tr style="background:#f0f0f0">'
                 + '<th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Account Name</th>'
-                + '<th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Account ID (paste into mapping)</th>'
+                + '<th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Account ID</th>'
                 + '<th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Status</th>'
                 + '</tr>' + rows + '</table>')
           + '</div>');
@@ -708,18 +804,14 @@ app.get('/actual-accounts', async function(req, res) {
           + (budget.name || budget.fileId) + '</strong>: ' + err.message + '</div>');
       }
     }
-
     res.send(page('Actual Accounts',
       '<p><a href="/">\u2190 Home</a></p>'
       + '<h1>\ud83d\udd0d Actual Budget Accounts</h1>'
-      + '<p style="font-size:0.9em;color:#555;margin-bottom:20px">Click an Account ID to select it, then copy and paste it into the mapping form.</p>'
       + sections.join('')));
   } catch (err) {
-    console.error('Actual accounts error:', err);
     res.send(page('Actual Accounts',
       '<p><a href="/">\u2190 Home</a></p>'
-      + '<div class="notice error">\u26a0\ufe0f Could not connect to Actual Budget: ' + err.message + '<br>'
-      + 'Make sure ACTUAL_SERVER_URL and ACTUAL_SERVER_PASSWORD are correct in your .env.</div>'));
+      + '<div class="notice error">\u26a0\ufe0f Could not connect to Actual Budget: ' + err.message + '</div>'));
   }
 });
 
@@ -727,21 +819,14 @@ app.get('/actual-accounts', async function(req, res) {
 app.post('/start-auth', function(req, res) {
   const isCard = req.body.isCard;
   if (!CLIENT_ID) return res.status(500).send('TRUELAYER_CLIENT_ID not set. <a href="/">Back</a>');
-
   const scope = isCard === 'true'
     ? 'cards balance transactions offline_access'
     : 'accounts balance transactions offline_access';
-
   const url = AUTH_URL + '/?' + new URLSearchParams({
-    response_type: 'code',
-    client_id: CLIENT_ID,
-    scope: scope,
-    redirect_uri: REDIRECT_URI,
-    providers: PROVIDERS,
-    response_mode: 'query',
+    response_type: 'code', client_id: CLIENT_ID, scope: scope,
+    redirect_uri: REDIRECT_URI, providers: PROVIDERS, response_mode: 'query',
     state: JSON.stringify({ isCard: isCard === 'true' }),
   });
-
   res.redirect(url);
 });
 
@@ -749,25 +834,15 @@ app.post('/start-auth', function(req, res) {
 app.get('/reauth/:name', function(req, res) {
   const name = decodeURIComponent(req.params.name);
   if (!CLIENT_ID) return res.status(500).send('TRUELAYER_CLIENT_ID not set. <a href="/">Back</a>');
-
   const config = loadConfig();
   const conn = config.connections.find(function(c) { return c.name === name; });
   if (!conn) return res.status(404).send('Connection not found. <a href="/">Back</a>');
-
-  const scope = conn.isCard
-    ? 'cards balance transactions offline_access'
-    : 'accounts balance transactions offline_access';
-
+  const scope = conn.isCard ? 'cards balance transactions offline_access' : 'accounts balance transactions offline_access';
   const url = AUTH_URL + '/?' + new URLSearchParams({
-    response_type: 'code',
-    client_id: CLIENT_ID,
-    scope: scope,
-    redirect_uri: REDIRECT_URI,
-    providers: PROVIDERS,
-    response_mode: 'query',
+    response_type: 'code', client_id: CLIENT_ID, scope: scope,
+    redirect_uri: REDIRECT_URI, providers: PROVIDERS, response_mode: 'query',
     state: JSON.stringify({ isCard: conn.isCard, reauth: name }),
   });
-
   res.redirect(url);
 });
 
@@ -777,24 +852,15 @@ app.get('/callback', async function(req, res) {
   const stateParam = req.query.state;
   if (!code) return res.status(400).send('Missing authorisation code. <a href="/">Try again</a>');
 
-  let isCard = false;
-  let reauthName = null;
-  try {
-    const parsed = JSON.parse(stateParam || '{}');
-    isCard     = parsed.isCard || false;
-    reauthName = parsed.reauth || null;
-  } catch (_) {}
+  let isCard = false, reauthName = null;
+  try { const p = JSON.parse(stateParam || '{}'); isCard = p.isCard || false; reauthName = p.reauth || null; } catch (_) {}
 
   try {
     const tokenRes = await fetch(AUTH_URL + '/connect/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI,
-        code: code,
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: code,
       }),
     });
     const tokenData = await tokenRes.json();
@@ -807,7 +873,6 @@ app.get('/callback', async function(req, res) {
       saveState(state);
       return res.send(page('Re-authorised',
         '<h1>\u2705 ' + reauthName + ' re-authorised!</h1>'
-        + '<p>Fresh token saved. The sync will resume on its next scheduled run.</p>'
         + '<p><a href="/">\u2190 Back to home</a></p>'));
     }
 
@@ -836,14 +901,11 @@ app.get('/callback', async function(req, res) {
 
     res.send(page('Connected',
       '<h1>\u2705 ' + connName + ' connected!</h1>'
-      + (connName !== baseName
-          ? '<p>\u2139\ufe0f You already had a connection called <strong>' + baseName + '</strong>, so this one was saved as <strong>' + connName + '</strong>.</p>'
-          : '')
       + '<p>Token saved. Now <a href="/accounts/' + encodeURIComponent(connName) + '/refresh">discover and map your accounts \u2192</a></p>'
       + '<p><a href="/">\u2190 Back to home</a></p>'));
   } catch (err) {
     console.error('Callback error:', err);
-    res.status(500).send(page('Error', '<h1>Error</h1><p>' + err.message + '</p><a href="/">\u2190 Back</a>'));
+    res.status(500).send(page('Error', '<h1>Error</h1><p>' + err.message + '</p><a href="/">Back</a>'));
   }
 });
 
@@ -865,12 +927,10 @@ app.get('/accounts/:name', function(req, res) {
   const config = loadConfig();
   const conn = config.connections.find(function(c) { return c.name === name; });
   if (!conn) return res.status(404).send('Connection not found. <a href="/">Back</a>');
-
   const rows   = buildRows(conn.accounts, null);
   const notice = conn.accounts.length === 0
-    ? { type: 'info', message: '\ud83d\udd17 No accounts mapped yet \u2014 click <strong>Sync from bank</strong> to fetch the account list from TrueLayer.' }
+    ? { type: 'info', message: '\ud83d\udd17 No accounts mapped yet \u2014 click <strong>Sync from bank</strong> to fetch accounts from TrueLayer.' }
     : null;
-
   res.send(renderMappingPage(name, conn, rows, notice));
 });
 
@@ -879,41 +939,32 @@ app.get('/accounts/:name/refresh', async function(req, res) {
   const config = loadConfig();
   const conn = config.connections.find(function(c) { return c.name === name; });
   if (!conn) return res.status(404).send('Connection not found. <a href="/">Back</a>');
-
   const state     = loadState();
   const connState = state.connections[name];
   if (!connState) {
     return res.send(renderMappingPage(name, conn, buildRows(conn.accounts, null), {
-      type: 'error',
-      message: '\u26a0\ufe0f No token for this connection \u2014 <a href="/reauth/' + encodeURIComponent(name) + '">re-authorise</a> first.',
+      type: 'error', message: '\u26a0\ufe0f No token \u2014 <a href="/reauth/' + encodeURIComponent(name) + '">re-authorise</a> first.',
     }));
   }
-
   try {
     const accessToken  = await getAccessToken(name, connState);
     const endpoint     = conn.isCard ? 'cards' : 'accounts';
-    const apiRes       = await fetch(API_URL + '/data/v1/' + endpoint, {
-      headers: { Authorization: 'Bearer ' + accessToken },
-    });
+    const apiRes       = await fetch(API_URL + '/data/v1/' + endpoint, { headers: { Authorization: 'Bearer ' + accessToken } });
     const apiData      = await apiRes.json();
     const liveAccounts = apiData.results || [];
-
     const rows     = buildRows(conn.accounts, liveAccounts);
     const newCount = liveAccounts.filter(function(a) {
       return !conn.accounts.find(function(s) { return s.trueLayerId === a.account_id; });
     }).length;
-    const notice = {
+    res.send(renderMappingPage(name, conn, rows, {
       type: 'success',
       message: '\u2705 Fetched ' + liveAccounts.length + ' account' + (liveAccounts.length !== 1 ? 's' : '') + ' from TrueLayer.'
-        + (newCount > 0 ? ' ' + newCount + ' new account' + (newCount !== 1 ? 's' : '') + ' discovered.' : ' All accounts already mapped.'),
-    };
-
-    res.send(renderMappingPage(name, conn, rows, notice));
+        + (newCount > 0 ? ' ' + newCount + ' new.' : ' All already mapped.'),
+    }));
   } catch (err) {
     console.error('Refresh error:', err);
     res.send(renderMappingPage(name, conn, buildRows(conn.accounts, null), {
-      type: 'error',
-      message: '\u26a0\ufe0f Could not fetch accounts from TrueLayer: ' + err.message + '. Your saved mappings are shown below.',
+      type: 'error', message: '\u26a0\ufe0f Could not fetch from TrueLayer: ' + err.message,
     }));
   }
 });
@@ -938,8 +989,8 @@ app.post('/save-mapping/:name', function(req, res) {
   if (mapped.length === 0) {
     return res.status(400).send(page('Nothing saved',
       '<h1>\u26a0\ufe0f Nothing saved</h1>'
-      + '<p>No accounts had an Actual Budget ID filled in. The sync container requires at least one.</p>'
-      + '<p><a href="/accounts/' + encodeURIComponent(name) + '">\u2190 Go back and fill in the IDs</a></p>'));
+      + '<p>No Actual Budget IDs filled in.</p>'
+      + '<p><a href="/accounts/' + encodeURIComponent(name) + '">\u2190 Go back</a></p>'));
   }
 
   conn.accounts = mapped;
@@ -948,13 +999,7 @@ app.post('/save-mapping/:name', function(req, res) {
   res.send(page('Mappings saved',
     '<h1>\u2705 Mappings saved!</h1>'
     + '<p>Saved ' + conn.accounts.length + ' account mapping(s) for <strong>' + name + '</strong>.</p>'
-    + '<p><a href="/accounts/' + encodeURIComponent(name) + '">\u2190 Back to account list</a> &nbsp;|&nbsp; <a href="/">Home</a></p>'
-    + '<hr style="margin:20px 0">'
-    + '<p><strong>Next steps:</strong></p>'
-    + '<p>Start your scheduled sync:</p>'
-    + '<pre>docker compose up -d truelayer-sync</pre>'
-    + '<p>Then tear down this setup UI:</p>'
-    + '<pre>docker compose --profile setup down truelayer-setup</pre>'));
+    + '<p><a href="/accounts/' + encodeURIComponent(name) + '">\u2190 Back to accounts</a> &nbsp;|&nbsp; <a href="/">Home</a></p>'));
 });
 
 app.listen(PORT, function() {
