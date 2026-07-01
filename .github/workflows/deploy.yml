@@ -20,9 +20,20 @@ jobs:
             --exclude '.git/' \
             "$GITHUB_WORKSPACE"/ "$DEPLOY_DIR"/
 
-      - name: Build setup image
+      - name: Build image if dependencies changed
         working-directory: /home/koesac/apps/actual-truelayer-sync
-        run: docker compose build actual-truelayer-setup
+        run: |
+          if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q 'truelayer-setup/package.json\|truelayer-setup/Dockerfile'; then
+            echo "Dependencies changed — rebuilding image"
+            docker compose build actual-truelayer-setup
+            docker compose up -d actual-truelayer-setup
+          else
+            echo "No dependency changes — container will pick up server.js automatically via nodemon"
+          fi
+
+      - name: Ensure container is running
+        working-directory: /home/koesac/apps/actual-truelayer-sync
+        run: docker compose up -d actual-truelayer-setup
 
       - name: Clean up old images
         run: docker image prune -f

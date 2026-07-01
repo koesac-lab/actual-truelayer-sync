@@ -3,15 +3,15 @@ services:
     build: ./truelayer-setup
     image: actual-truelayer-setup:latest
     container_name: actual-truelayer-setup
+    restart: unless-stopped
     ports:
       - "3099:3099"
     env_file: .env
     volumes:
       - ./truelayer-data:/app/data
+      - ./truelayer-setup/server.js:/app/server.js
     networks:
       - finance
-    profiles:
-      - setup
 
 networks:
   finance:
